@@ -1,0 +1,1839 @@
+//! A synchronous, dependency-light reference client for CLP v1.3.
+//!
+//! The crate speaks only the public Chymeral Link Protocol. It neither imports
+//! Chymeral internals nor creates a graphics window of its own.
+
+use std::{
+    collections::{BTreeSet, VecDeque},
+    env,
+    error::Error as StdError,
+    fmt::{Display, Formatter},
+    io::{self, Read, Write},
+    thread,
+    time::{Duration, Instant},
+};
+
+use interprocess::local_socket::{
+    GenericNamespaced, ToNsName, prelude::LocalSocketStream, traits::Stream as _,
+};
+use serde::{Deserialize, Serialize};
+
+/// The endpoint environment variable inherited from a Chymeral child process.
+pub const ENDPOINT_ENV: &str = "CHYMERAL_CLP_ENDPOINT";
+/// The session token environment variable inherited from a Chymeral child process.
+pub const TOKEN_ENV: &str = "CHYMERAL_CLP_TOKEN";
+/// The largest CLP frame, including its one-byte kind discriminator.
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// The newest CLP version implemented by this SDK.
+pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 3);
+const IO_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+const IO_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+const BINARY_FRAGMENT_BYTES: usize = 64 * 1024;
+
+/// A CLP protocol version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ProtocolVersion {
+    /// Major protocol version.
+    pub major: u16,
+    /// Minor protocol version.
+    pub minor: u16,
+}
+
+impl ProtocolVersion {
+    /// Creates a protocol version.
+    pub const fn new(major: u16, minor: u16) -> Self {
+        Self { major, minor }
+    }
+}
+
+impl Display for ProtocolVersion {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// A feature negotiated during the CLP handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    /// Retained scene nodes and their contents.
+    Scene,
+    /// Session-owned RGBA8 textures.
+    Resources,
+    /// Keyboard, pointer, focus, scene, and terminal input.
+    Input,
+    /// Tick and frame notifications.
+    Timing,
+    /// Rectangle overlap queries and transitions.
+    Overlap,
+}
+
+/// A deterministic set of negotiated or requested capabilities.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities(BTreeSet<Capability>);
+
+impl Capabilities {
+    /// No capabilities.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Every CLP v1.3 capability.
+    pub fn all() -> Self {
+        Self::from([
+            Capability::Scene,
+            Capability::Resources,
+            Capability::Input,
+            Capability::Timing,
+            Capability::Overlap,
+        ])
+    }
+
+    /// Returns whether this set contains a capability.
+    pub fn contains(&self, capability: Capability) -> bool {
+        self.0.contains(&capability)
+    }
+
+    /// Iterates in wire-order-independent deterministic order.
+    pub fn iter(&self) -> impl Iterator<Item = Capability> + '_ {
+        self.0.iter().copied()
+    }
+}
+
+impl<const N: usize> From<[Capability; N]> for Capabilities {
+    fn from(capabilities: [Capability; N]) -> Self {
+        Self(capabilities.into_iter().collect())
+    }
+}
+
+impl FromIterator<Capability> for Capabilities {
+    fn from_iter<T: IntoIterator<Item = Capability>>(capabilities: T) -> Self {
+        Self(capabilities.into_iter().collect())
+    }
+}
+
+/// An opaque session identifier owned by Chymeral.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Returns the protocol representation, such as `session-1`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for SessionId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// An opaque scene node handle, valid only in its creating session.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeHandle(String);
+
+impl NodeHandle {
+    /// Returns the protocol representation, such as `node-1`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for NodeHandle {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// An opaque RGBA8 texture handle, valid only in its creating session.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TextureHandle(String);
+
+impl TextureHandle {
+    /// Returns the protocol representation, such as `texture-1`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for TextureHandle {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Arguments and launch commands supplied by Chymeral during initialization.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct InitContext {
+    /// Program arguments from the launcher.
+    pub arguments: Vec<String>,
+    /// Initial commands requested by the launcher.
+    pub initial_commands: Vec<StartupCommand>,
+}
+
+/// A launch command supplied in [`InitContext`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct StartupCommand {
+    /// Command name.
+    pub name: String,
+    /// Command arguments.
+    pub arguments: Vec<String>,
+}
+
+/// Immutable data negotiated before the session enters the running state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// Version selected by the host.
+    pub protocol_version: ProtocolVersion,
+    /// The session identity.
+    pub session_id: SessionId,
+    /// Capabilities granted by the host.
+    pub capabilities: Capabilities,
+    /// Launch context from the host.
+    pub context: InitContext,
+}
+
+/// A root-node drawing layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SceneLayer {
+    /// Behind the terminal grid.
+    Underlay,
+    /// In front of the terminal grid.
+    #[default]
+    Overlay,
+}
+
+/// Complete properties used when creating a scene node.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct NodeProperties {
+    /// Local x coordinate in logical pixels.
+    pub x: f64,
+    /// Local y coordinate in logical pixels.
+    pub y: f64,
+    /// Width in logical pixels.
+    pub width: f64,
+    /// Height in logical pixels.
+    pub height: f64,
+    /// Whether the node is drawn. Invisible nodes may still overlap.
+    pub visible: bool,
+    /// Whether children are clipped to this node's bounds.
+    pub clip_children: bool,
+    /// Sibling paint order.
+    pub z_index: i32,
+    /// Enables this node as a rectangular overlap target.
+    pub overlap_enabled: bool,
+}
+
+impl NodeProperties {
+    /// Creates visible, unclipped node properties with default stacking order.
+    pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            visible: true,
+            clip_children: false,
+            z_index: 0,
+            overlap_enabled: false,
+        }
+    }
+}
+
+/// A partial node-property update.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct NodePropertiesPatch {
+    /// Optional local x coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Optional local y coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    /// Optional width.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    /// Optional height.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    /// Optional visibility flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    /// Optional child clipping flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip_children: Option<bool>,
+    /// Optional sibling paint order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub z_index: Option<i32>,
+    /// Optional overlap flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_enabled: Option<bool>,
+}
+
+/// Visual content for a scene node.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeContent {
+    /// A node without visible content.
+    Empty,
+    /// A solid premultiplied RGBA8 color.
+    Solid {
+        /// RGBA8 color components.
+        color: [u8; 4],
+    },
+    /// A texture with independent opacity.
+    Image {
+        /// Session-owned RGBA8 texture.
+        texture: TextureHandle,
+        /// Image opacity in the inclusive range accepted by Chymeral.
+        opacity: f32,
+    },
+}
+
+/// Result of an overlap query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlapQuery {
+    /// Whether at least one enabled node overlaps the queried node.
+    pub overlapping: bool,
+    /// Intersecting enabled nodes in host-defined deterministic order.
+    pub nodes: Vec<NodeHandle>,
+}
+
+/// A requested host notification subscription.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Subscription {
+    /// Raw keyboard, pointer, scroll, focus, and custom events.
+    RawInput,
+    /// Terminal output and exit state.
+    Terminal,
+    /// Tick and frame notifications.
+    Timing,
+}
+
+/// A category of continuous notifications that was coalesced or dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryCategory {
+    /// Raw pointer input.
+    RawInput,
+    /// Scene pointer or drag movement.
+    Scene,
+    /// Terminal output state.
+    Terminal,
+    /// Tick or frame timing.
+    Timing,
+}
+
+/// A program phase used when reporting a client fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramPhase {
+    /// Initialization processing.
+    Init,
+    /// Startup processing.
+    Start,
+    /// Event processing.
+    Event,
+    /// Command processing.
+    Command,
+    /// Tick processing.
+    Tick,
+    /// Frame processing.
+    Frame,
+}
+
+/// A terminal reason for a session closure.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloseReason {
+    /// The client requested closure.
+    ClientRequested,
+    /// The client reported an application fault.
+    ProgramFault {
+        /// Phase that failed.
+        phase: ProgramPhase,
+        /// Client-provided diagnostic message.
+        message: String,
+    },
+    /// Chymeral is shutting down.
+    HostShutdown,
+    /// This session exceeded its bounded host-notification queue.
+    HostOverloaded,
+    /// The session violated CLP.
+    ProtocolViolation,
+    /// The transport disconnected before normal closure.
+    TransportDisconnected,
+}
+
+/// A two-dimensional logical coordinate or delta.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+pub struct Vec2 {
+    /// Horizontal component.
+    pub x: f64,
+    /// Vertical component.
+    pub y: f64,
+}
+
+/// Modifier keys accompanying an input event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Modifiers {
+    /// Shift modifier.
+    pub shift: bool,
+    /// Control modifier.
+    pub control: bool,
+    /// Alt modifier.
+    pub alt: bool,
+    /// Platform super modifier.
+    pub super_key: bool,
+}
+
+/// A logical key reported by Chymeral.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Key {
+    /// A text character key.
+    Character { value: String },
+    /// A named non-text key.
+    Named { value: String },
+    /// A dead key, optionally with its character.
+    Dead { value: Option<String> },
+    /// A key Chymeral cannot identify.
+    Unidentified,
+}
+
+/// Press or release state of a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyState {
+    /// Pressed.
+    Pressed,
+    /// Released.
+    Released,
+}
+
+/// A pointer button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PointerButton {
+    /// Primary pointer button.
+    Primary,
+    /// Secondary pointer button.
+    Secondary,
+    /// Middle pointer button.
+    Middle,
+    /// Back pointer button.
+    Back,
+    /// Forward pointer button.
+    Forward,
+    /// A platform-specific button.
+    Other { value: u16 },
+}
+
+/// Unit used by a pointer scroll delta.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollUnit {
+    /// Logical text lines.
+    Line,
+    /// Logical pixels.
+    Pixel,
+}
+
+/// Window focus state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusState {
+    /// The Chymeral window gained focus.
+    Gained,
+    /// The Chymeral window lost focus.
+    Lost,
+}
+
+/// Terminal state reported to a subscriber.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalState {
+    /// Terminal output is available.
+    OutputAvailable,
+    /// The terminal child exited.
+    Exited,
+}
+
+/// A directed scene event.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SceneEvent {
+    /// Pointer entered a node.
+    PointerEnter {
+        target: NodeHandle,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Pointer left a node.
+    PointerLeave {
+        target: NodeHandle,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Pointer moved over a node.
+    PointerMove {
+        target: NodeHandle,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Pointer pressed a node.
+    PointerPress {
+        target: NodeHandle,
+        button: PointerButton,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Pointer released over a node.
+    PointerRelease {
+        target: NodeHandle,
+        button: PointerButton,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A node gained keyboard focus.
+    FocusGained { target: NodeHandle },
+    /// A node lost keyboard focus.
+    FocusLost { target: NodeHandle },
+    /// A drag began from a node.
+    DragStart {
+        source: NodeHandle,
+        origin: Vec2,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A drag entered a target.
+    DragEnter {
+        source: Option<NodeHandle>,
+        target: Option<NodeHandle>,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A drag left a target.
+    DragLeave {
+        source: Option<NodeHandle>,
+        target: Option<NodeHandle>,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A drag moved.
+    DragMove {
+        source: Option<NodeHandle>,
+        target: Option<NodeHandle>,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A drag was dropped.
+    Drop {
+        source: Option<NodeHandle>,
+        target: Option<NodeHandle>,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A drag ended.
+    DragEnd {
+        source: Option<NodeHandle>,
+        target: Option<NodeHandle>,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// A drag was cancelled.
+    DragCancel {
+        source: NodeHandle,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Two enabled node rectangles began overlapping.
+    OverlapEnter {
+        first: NodeHandle,
+        second: NodeHandle,
+    },
+    /// Two enabled node rectangles stopped overlapping.
+    OverlapLeave {
+        first: NodeHandle,
+        second: NodeHandle,
+    },
+}
+
+/// An input or scene event from Chymeral.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Event {
+    /// Keyboard input for the focused scene owner.
+    Key {
+        key: Key,
+        text: Option<String>,
+        state: KeyState,
+        modifiers: Modifiers,
+        repeat: bool,
+    },
+    /// Raw pointer movement.
+    PointerMove {
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Raw pointer press.
+    PointerPress {
+        button: PointerButton,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Raw pointer release.
+    PointerRelease {
+        button: PointerButton,
+        position: Vec2,
+        modifiers: Modifiers,
+    },
+    /// Raw pointer scroll.
+    Scroll {
+        position: Vec2,
+        delta: Vec2,
+        unit: ScrollUnit,
+        modifiers: Modifiers,
+    },
+    /// Chymeral window focus state.
+    Focus { state: FocusState },
+    /// A scene event directed to this session.
+    Scene { event: SceneEvent },
+    /// A subscribed terminal state.
+    Terminal { state: TerminalState },
+    /// A host-defined custom event.
+    Custom { name: String, payload: Vec<u8> },
+}
+
+/// Current dimensions of the Chymeral surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Resize {
+    /// Physical surface width in pixels.
+    pub physical_width: u32,
+    /// Physical surface height in pixels.
+    pub physical_height: u32,
+    /// Logical surface width.
+    pub logical_width: f64,
+    /// Logical surface height.
+    pub logical_height: f64,
+    /// Physical pixels per logical unit.
+    pub scale_factor: f64,
+}
+
+/// A message delivered after the client completes the CLP lifecycle handshake.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Notification {
+    /// Input, scene, terminal, or custom event.
+    Event(Event),
+    /// Scheduler tick duration.
+    Tick(Duration),
+    /// Render-frame duration.
+    Frame(Duration),
+    /// Current surface dimensions.
+    Resize(Resize),
+    /// The host coalesced continuous notifications.
+    DeliveryGap(Vec<DeliveryCategory>),
+    /// The host asks the client to close during shutdown.
+    Closing(CloseReason),
+    /// Terminal session closure.
+    Closed(CloseReason),
+}
+
+/// Errors emitted by the SDK before, during, or after a CLP exchange.
+#[derive(Debug)]
+pub enum Error {
+    /// An inherited environment variable is missing.
+    MissingEnvironment(&'static str),
+    /// Local-socket I/O failed.
+    Io(io::Error),
+    /// JSON encoding or decoding failed.
+    Json(serde_json::Error),
+    /// The host sent an invalid or unexpected wire message.
+    Protocol(String),
+    /// The host rejected a non-command operation.
+    Host { code: String, message: String },
+    /// The host rejected a scene command.
+    Command {
+        request_id: String,
+        code: String,
+        message: String,
+    },
+    /// A public SDK operation needs a capability not granted at handshake.
+    CapabilityNotGranted(Capability),
+    /// The session closed before an operation could complete.
+    SessionClosed(CloseReason),
+    /// An SDK method received invalid local input.
+    InvalidInput(String),
+}
+
+impl Display for Error {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingEnvironment(name) => {
+                write!(formatter, "missing inherited environment variable {name}")
+            }
+            Self::Io(error) => write!(formatter, "CLP transport I/O failed: {error}"),
+            Self::Json(error) => write!(formatter, "CLP JSON codec failed: {error}"),
+            Self::Protocol(message) => write!(formatter, "CLP protocol violation: {message}"),
+            Self::Host { code, message } => write!(formatter, "CLP host error {code}: {message}"),
+            Self::Command {
+                request_id,
+                code,
+                message,
+            } => write!(
+                formatter,
+                "CLP command {request_id} failed with {code}: {message}"
+            ),
+            Self::CapabilityNotGranted(capability) => {
+                write!(formatter, "CLP capability {capability:?} was not granted")
+            }
+            Self::SessionClosed(reason) => write!(formatter, "CLP session is closed: {reason:?}"),
+            Self::InvalidInput(message) => write!(formatter, "invalid CLP client input: {message}"),
+        }
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+/// Result type returned by public SDK operations.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// A synchronous CLP v1.3 client.
+///
+/// `connect_from_env` completes the `hello → init → init_complete → start →
+/// started` handshake. Its returned [`SessionInfo`] preserves the data from
+/// `init`, while a successful return means the program has entered `started`.
+pub struct Client {
+    stream: LocalSocketStream,
+    reader: FrameReader,
+    session: SessionInfo,
+    next_request_id: u64,
+    pending_notifications: VecDeque<Notification>,
+    closed_reason: Option<CloseReason>,
+}
+
+impl Client {
+    /// Connects using the endpoint and token inherited from Chymeral.
+    pub fn connect_from_env(requested_capabilities: Capabilities) -> Result<Self> {
+        let endpoint =
+            env::var(ENDPOINT_ENV).map_err(|_| Error::MissingEnvironment(ENDPOINT_ENV))?;
+        let token = env::var(TOKEN_ENV).map_err(|_| Error::MissingEnvironment(TOKEN_ENV))?;
+        Self::connect(&endpoint, &token, requested_capabilities)
+    }
+
+    /// Connects to an explicit local endpoint. This is intended for launchers and tests.
+    pub fn connect(
+        endpoint: &str,
+        token: &str,
+        requested_capabilities: Capabilities,
+    ) -> Result<Self> {
+        if token.is_empty() {
+            return Err(Error::InvalidInput(
+                "the CLP token may not be empty".to_owned(),
+            ));
+        }
+        let name = endpoint
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|error| Error::InvalidInput(format!("invalid CLP endpoint: {error}")))?;
+        let mut stream = LocalSocketStream::connect(name)?;
+        if let Err(error) = stream.set_send_timeout(Some(IO_STALL_TIMEOUT)) {
+            if error.kind() != io::ErrorKind::Unsupported {
+                return Err(Error::Io(error));
+            }
+        }
+
+        write_json(
+            &mut stream,
+            &WireClientMessage::Hello {
+                protocol: CLP_PROTOCOL_VERSION,
+                token: token.to_owned(),
+                capabilities: requested_capabilities.iter().collect(),
+            },
+        )?;
+
+        let mut reader = FrameReader::default();
+        let (protocol, session_id, capabilities, context) =
+            match read_json(&mut stream, &mut reader)? {
+                WireHostMessage::Init {
+                    protocol,
+                    session_id,
+                    capabilities,
+                    context,
+                } => (protocol, session_id, capabilities, context),
+                WireHostMessage::Error { code, message } => {
+                    return Err(Error::Host { code, message });
+                }
+                message => return Err(unexpected("init", message.name())),
+            };
+        if protocol.major != CLP_PROTOCOL_VERSION.major
+            || protocol.minor > CLP_PROTOCOL_VERSION.minor
+        {
+            return Err(Error::Protocol(format!(
+                "host negotiated unsupported version {protocol}; SDK supports {CLP_PROTOCOL_VERSION}"
+            )));
+        }
+        let session = SessionInfo {
+            protocol_version: protocol,
+            session_id,
+            capabilities: capabilities.into_iter().collect(),
+            context,
+        };
+
+        write_json(&mut stream, &WireClientMessage::InitComplete)?;
+        let start = read_json(&mut stream, &mut reader)?;
+        match start {
+            WireHostMessage::Start { session_id } if session_id == session.session_id => {}
+            WireHostMessage::Start { session_id } => {
+                return Err(Error::Protocol(format!(
+                    "start belongs to {session_id}, expected {}",
+                    session.session_id
+                )));
+            }
+            WireHostMessage::Error { code, message } => return Err(Error::Host { code, message }),
+            other => return Err(unexpected("start", other.name())),
+        }
+        write_json(&mut stream, &WireClientMessage::Started)?;
+
+        Ok(Self {
+            stream,
+            reader,
+            session,
+            next_request_id: 1,
+            pending_notifications: VecDeque::new(),
+            closed_reason: None,
+        })
+    }
+
+    /// Returns immutable negotiated session data, including initialization context.
+    pub fn session(&self) -> &SessionInfo {
+        &self.session
+    }
+
+    /// Returns whether the host granted a capability.
+    pub fn has_capability(&self, capability: Capability) -> bool {
+        self.session.capabilities.contains(capability)
+    }
+
+    /// Replaces notification subscriptions and returns the effective host set.
+    pub fn subscribe(
+        &mut self,
+        subscriptions: impl IntoIterator<Item = Subscription>,
+    ) -> Result<Vec<Subscription>> {
+        let subscriptions: Vec<_> = subscriptions.into_iter().collect();
+        for subscription in &subscriptions {
+            match subscription {
+                Subscription::RawInput | Subscription::Terminal => {
+                    self.require(Capability::Input)?
+                }
+                Subscription::Timing => self.require(Capability::Timing)?,
+            }
+        }
+        self.ensure_open()?;
+        self.write_client_json(&WireClientMessage::Subscribe { subscriptions })?;
+        loop {
+            match self.read_running_message()? {
+                WireHostMessage::Subscribed {
+                    session_id,
+                    subscriptions,
+                } => {
+                    self.expect_session(&session_id)?;
+                    return Ok(subscriptions);
+                }
+                message => self.queue_notification(message)?,
+            }
+        }
+    }
+
+    /// Creates a root scene node and returns its opaque handle.
+    pub fn create_root(
+        &mut self,
+        layer: SceneLayer,
+        properties: NodeProperties,
+        content: NodeContent,
+    ) -> Result<NodeHandle> {
+        self.require_scene_content(&properties, &content)?;
+        match self.command(
+            WireSceneCommand::CreateRoot {
+                layer,
+                properties,
+                content,
+            },
+            None,
+        )? {
+            WireCommandResult::Node { node } => Ok(node),
+            result => Err(unexpected_command_result("node", result.name())),
+        }
+    }
+
+    /// Creates a child scene node and returns its opaque handle.
+    pub fn create_child(
+        &mut self,
+        parent: &NodeHandle,
+        properties: NodeProperties,
+        content: NodeContent,
+    ) -> Result<NodeHandle> {
+        self.require_scene_content(&properties, &content)?;
+        match self.command(
+            WireSceneCommand::CreateChild {
+                parent: parent.clone(),
+                properties,
+                content,
+            },
+            None,
+        )? {
+            WireCommandResult::Node { node } => Ok(node),
+            result => Err(unexpected_command_result("node", result.name())),
+        }
+    }
+
+    /// Updates selected node properties.
+    pub fn update_node(
+        &mut self,
+        node: &NodeHandle,
+        properties: NodePropertiesPatch,
+    ) -> Result<()> {
+        self.require(Capability::Scene)?;
+        if properties.overlap_enabled.is_some() {
+            self.require(Capability::Overlap)?;
+        }
+        Self::expect_acknowledged(self.command(
+            WireSceneCommand::UpdateNode {
+                node: node.clone(),
+                properties,
+            },
+            None,
+        )?)
+    }
+
+    /// Replaces a node's visual content.
+    pub fn set_content(&mut self, node: &NodeHandle, content: NodeContent) -> Result<()> {
+        self.require(Capability::Scene)?;
+        self.require_content_capabilities(&content)?;
+        Self::expect_acknowledged(self.command(
+            WireSceneCommand::SetContent {
+                node: node.clone(),
+                content,
+            },
+            None,
+        )?)
+    }
+
+    /// Changes a node parent, or makes it a root when `parent` is `None`.
+    pub fn reparent(&mut self, node: &NodeHandle, parent: Option<&NodeHandle>) -> Result<()> {
+        self.require(Capability::Scene)?;
+        Self::expect_acknowledged(self.command(
+            WireSceneCommand::Reparent {
+                node: node.clone(),
+                parent: parent.cloned(),
+            },
+            None,
+        )?)
+    }
+
+    /// Removes a node and all of its descendants.
+    pub fn remove_node(&mut self, node: &NodeHandle) -> Result<()> {
+        self.require(Capability::Scene)?;
+        Self::expect_acknowledged(
+            self.command(WireSceneCommand::RemoveNode { node: node.clone() }, None)?,
+        )
+    }
+
+    /// Uploads an RGBA8 texture and returns its opaque handle.
+    pub fn upload_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<TextureHandle> {
+        self.require(Capability::Resources)?;
+        let expected_length = rgba8_byte_len(width, height)?;
+        if pixels.len() != expected_length {
+            return Err(Error::InvalidInput(format!(
+                "RGBA8 texture data has {} bytes, expected {expected_length}",
+                pixels.len()
+            )));
+        }
+        match self.command(
+            WireSceneCommand::UploadTexture { width, height },
+            Some(pixels),
+        )? {
+            WireCommandResult::Texture { texture } => Ok(texture),
+            result => Err(unexpected_command_result("texture", result.name())),
+        }
+    }
+
+    /// Destroys an unreferenced session-owned texture.
+    pub fn destroy_texture(&mut self, texture: &TextureHandle) -> Result<()> {
+        self.require(Capability::Resources)?;
+        Self::expect_acknowledged(self.command(
+            WireSceneCommand::DestroyTexture {
+                texture: texture.clone(),
+            },
+            None,
+        )?)
+    }
+
+    /// Returns enabled same-session nodes currently overlapping `node`.
+    pub fn query_overlaps(&mut self, node: &NodeHandle) -> Result<OverlapQuery> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::Overlap)?;
+        match self.command(WireSceneCommand::QueryOverlaps { node: node.clone() }, None)? {
+            WireCommandResult::Overlaps { overlapping, nodes } => {
+                Ok(OverlapQuery { overlapping, nodes })
+            }
+            result => Err(unexpected_command_result("overlaps", result.name())),
+        }
+    }
+
+    /// Blocks until a pending or newly received host notification arrives.
+    pub fn next_notification(&mut self) -> Result<Notification> {
+        if let Some(notification) = self.pending_notifications.pop_front() {
+            return Ok(notification);
+        }
+        loop {
+            let message = self.read_running_message()?;
+            if let Some(notification) = self.notification_from_message(message)? {
+                return Ok(notification);
+            }
+        }
+    }
+
+    /// Returns the next notification if one is already available without blocking.
+    pub fn try_next_notification(&mut self) -> Result<Option<Notification>> {
+        if let Some(notification) = self.pending_notifications.pop_front() {
+            return Ok(Some(notification));
+        }
+        self.stream.set_nonblocking(true)?;
+        let result = self.reader.try_read_json(&mut self.stream);
+        let restore = self.stream.set_nonblocking(false);
+        restore?;
+        let message = result?;
+        match message {
+            Some(message) => self.notification_from_message(message),
+            None => Ok(None),
+        }
+    }
+
+    /// Reports a client fault and waits for the terminal `closed` message.
+    pub fn report_fault(
+        &mut self,
+        phase: ProgramPhase,
+        message: impl Into<String>,
+    ) -> Result<CloseReason> {
+        self.close_with(WireClientMessage::Fault {
+            phase,
+            message: message.into(),
+        })
+    }
+
+    /// Requests clean session closure and waits for the terminal `closed` message.
+    pub fn close(&mut self) -> Result<CloseReason> {
+        self.close_with(WireClientMessage::Close)
+    }
+
+    fn close_with(&mut self, message: WireClientMessage) -> Result<CloseReason> {
+        if let Some(reason) = &self.closed_reason {
+            return Ok(reason.clone());
+        }
+        self.write_client_json(&message)?;
+        loop {
+            match self.read_running_message()? {
+                WireHostMessage::Closed { session_id, reason } => {
+                    self.expect_session(&session_id)?;
+                    self.closed_reason = Some(reason.clone());
+                    return Ok(reason);
+                }
+                message => self.queue_notification(message)?,
+            }
+        }
+    }
+
+    fn command(
+        &mut self,
+        command: WireSceneCommand,
+        binary_payload: Option<&[u8]>,
+    ) -> Result<WireCommandResult> {
+        self.ensure_open()?;
+        let request_id = self.next_request_id();
+        self.write_client_json(&WireClientMessage::Command {
+            request_id: request_id.clone(),
+            command,
+        })?;
+        if let Some(binary_payload) = binary_payload {
+            for fragment in binary_payload.chunks(BINARY_FRAGMENT_BYTES) {
+                self.write_client_frame(b'B', fragment)?;
+            }
+        }
+        loop {
+            match self.read_running_message()? {
+                WireHostMessage::Result {
+                    request_id: received,
+                    result,
+                } if received == request_id => return Ok(result),
+                WireHostMessage::CommandError {
+                    request_id: received,
+                    code,
+                    message,
+                } if received == request_id => {
+                    return Err(Error::Command {
+                        request_id,
+                        code,
+                        message,
+                    });
+                }
+                WireHostMessage::Result {
+                    request_id: received,
+                    ..
+                }
+                | WireHostMessage::CommandError {
+                    request_id: received,
+                    ..
+                } => {
+                    return Err(Error::Protocol(format!(
+                        "received response for {received} while waiting for {request_id}"
+                    )));
+                }
+                message => self.queue_notification(message)?,
+            }
+        }
+    }
+
+    fn read_running_message(&mut self) -> Result<WireHostMessage> {
+        self.ensure_open()?;
+        read_json(&mut self.stream, &mut self.reader)
+    }
+
+    fn write_client_json(&mut self, message: &impl Serialize) -> Result<()> {
+        let payload = serde_json::to_vec(message)?;
+        self.write_client_frame(b'J', &payload)
+    }
+
+    fn write_client_frame(&mut self, kind: u8, payload: &[u8]) -> Result<()> {
+        let length = payload
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidInput("frame length overflow".to_owned()))?;
+        if length > MAX_FRAME_BYTES {
+            return Err(Error::InvalidInput(format!(
+                "frame length {length} exceeds {MAX_FRAME_BYTES}"
+            )));
+        }
+        let length = u32::try_from(length)
+            .map_err(|_| Error::InvalidInput("frame length exceeds u32".to_owned()))?;
+        self.write_client_bytes(&length.to_be_bytes())?;
+        self.write_client_bytes(&[kind])?;
+        self.write_client_bytes(payload)
+    }
+
+    fn write_client_bytes(&mut self, mut bytes: &[u8]) -> Result<()> {
+        let deadline = Instant::now() + IO_STALL_TIMEOUT;
+        while !bytes.is_empty() {
+            match self.stream.write(bytes) {
+                Ok(0) => {
+                    self.pump_host_while_writing()?;
+                    wait_for_write_capacity(deadline)?;
+                }
+                Ok(count) => bytes = &bytes[count..],
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if read_would_block(&error) => {
+                    self.pump_host_while_writing()?;
+                    wait_for_write_capacity(deadline)?;
+                }
+                Err(error) => return Err(Error::Io(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn pump_host_while_writing(&mut self) -> Result<()> {
+        self.stream.set_nonblocking(true)?;
+        let result = self.reader.try_read_json(&mut self.stream);
+        let restore = self.stream.set_nonblocking(false);
+        restore?;
+        if let Some(message) = result? {
+            self.queue_notification(message)?;
+        }
+        Ok(())
+    }
+
+    fn notification_from_message(
+        &mut self,
+        message: WireHostMessage,
+    ) -> Result<Option<Notification>> {
+        match message {
+            WireHostMessage::Event { session_id, event } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::Event(event)))
+            }
+            WireHostMessage::Tick { session_id, dt_ns } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::Tick(parse_duration(dt_ns)?)))
+            }
+            WireHostMessage::Frame { session_id, dt_ns } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::Frame(parse_duration(dt_ns)?)))
+            }
+            WireHostMessage::Resize {
+                session_id,
+                physical_width,
+                physical_height,
+                logical_width,
+                logical_height,
+                scale_factor,
+            } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::Resize(Resize {
+                    physical_width,
+                    physical_height,
+                    logical_width,
+                    logical_height,
+                    scale_factor,
+                })))
+            }
+            WireHostMessage::DeliveryGap {
+                session_id,
+                categories,
+            } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::DeliveryGap(categories)))
+            }
+            WireHostMessage::Closing { session_id, reason } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::Closing(reason)))
+            }
+            WireHostMessage::Closed { session_id, reason } => {
+                self.expect_session(&session_id)?;
+                self.closed_reason = Some(reason.clone());
+                Ok(Some(Notification::Closed(reason)))
+            }
+            WireHostMessage::Error { code, message } => Err(Error::Host { code, message }),
+            other => Err(unexpected("notification", other.name())),
+        }
+    }
+
+    fn queue_notification(&mut self, message: WireHostMessage) -> Result<()> {
+        match self.notification_from_message(message)? {
+            Some(Notification::Closed(reason)) => return Err(Error::SessionClosed(reason)),
+            Some(notification) => self.pending_notifications.push_back(notification),
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn expect_session(&self, received: &SessionId) -> Result<()> {
+        if received == &self.session.session_id {
+            Ok(())
+        } else {
+            Err(Error::Protocol(format!(
+                "message belongs to {received}, expected {}",
+                self.session.session_id
+            )))
+        }
+    }
+
+    fn require(&self, capability: Capability) -> Result<()> {
+        if self.has_capability(capability) {
+            Ok(())
+        } else {
+            Err(Error::CapabilityNotGranted(capability))
+        }
+    }
+
+    fn require_scene_content(
+        &self,
+        properties: &NodeProperties,
+        content: &NodeContent,
+    ) -> Result<()> {
+        self.require(Capability::Scene)?;
+        self.require_content_capabilities(content)?;
+        if properties.overlap_enabled {
+            self.require(Capability::Overlap)?;
+        }
+        Ok(())
+    }
+
+    fn require_content_capabilities(&self, content: &NodeContent) -> Result<()> {
+        if matches!(content, NodeContent::Image { .. }) {
+            self.require(Capability::Resources)?;
+        }
+        Ok(())
+    }
+
+    fn expect_acknowledged(result: WireCommandResult) -> Result<()> {
+        if matches!(result, WireCommandResult::Acknowledged) {
+            Ok(())
+        } else {
+            Err(unexpected_command_result("acknowledged", result.name()))
+        }
+    }
+
+    fn ensure_open(&self) -> Result<()> {
+        match &self.closed_reason {
+            Some(reason) => Err(Error::SessionClosed(reason.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn next_request_id(&mut self) -> String {
+        let request_id = format!("sdk-{}", self.next_request_id);
+        self.next_request_id = self.next_request_id.checked_add(1).unwrap_or(1);
+        request_id
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireClientMessage {
+    Hello {
+        protocol: ProtocolVersion,
+        token: String,
+        capabilities: Vec<Capability>,
+    },
+    InitComplete,
+    Started,
+    Fault {
+        phase: ProgramPhase,
+        message: String,
+    },
+    Close,
+    Command {
+        request_id: String,
+        command: WireSceneCommand,
+    },
+    Subscribe {
+        subscriptions: Vec<Subscription>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum WireSceneCommand {
+    CreateRoot {
+        layer: SceneLayer,
+        properties: NodeProperties,
+        content: NodeContent,
+    },
+    CreateChild {
+        parent: NodeHandle,
+        properties: NodeProperties,
+        content: NodeContent,
+    },
+    UpdateNode {
+        node: NodeHandle,
+        properties: NodePropertiesPatch,
+    },
+    SetContent {
+        node: NodeHandle,
+        content: NodeContent,
+    },
+    Reparent {
+        node: NodeHandle,
+        parent: Option<NodeHandle>,
+    },
+    RemoveNode {
+        node: NodeHandle,
+    },
+    QueryOverlaps {
+        node: NodeHandle,
+    },
+    UploadTexture {
+        width: u32,
+        height: u32,
+    },
+    DestroyTexture {
+        texture: TextureHandle,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireHostMessage {
+    Init {
+        protocol: ProtocolVersion,
+        session_id: SessionId,
+        capabilities: Vec<Capability>,
+        context: InitContext,
+    },
+    Start {
+        session_id: SessionId,
+    },
+    Event {
+        session_id: SessionId,
+        event: Event,
+    },
+    Tick {
+        session_id: SessionId,
+        dt_ns: String,
+    },
+    Frame {
+        session_id: SessionId,
+        dt_ns: String,
+    },
+    Resize {
+        session_id: SessionId,
+        physical_width: u32,
+        physical_height: u32,
+        logical_width: f64,
+        logical_height: f64,
+        scale_factor: f64,
+    },
+    Subscribed {
+        session_id: SessionId,
+        subscriptions: Vec<Subscription>,
+    },
+    DeliveryGap {
+        session_id: SessionId,
+        categories: Vec<DeliveryCategory>,
+    },
+    Closing {
+        session_id: SessionId,
+        reason: CloseReason,
+    },
+    Closed {
+        session_id: SessionId,
+        reason: CloseReason,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
+    Result {
+        request_id: String,
+        result: WireCommandResult,
+    },
+    CommandError {
+        request_id: String,
+        code: String,
+        message: String,
+    },
+}
+
+impl WireHostMessage {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Init { .. } => "init",
+            Self::Start { .. } => "start",
+            Self::Event { .. } => "event",
+            Self::Tick { .. } => "tick",
+            Self::Frame { .. } => "frame",
+            Self::Resize { .. } => "resize",
+            Self::Subscribed { .. } => "subscribed",
+            Self::DeliveryGap { .. } => "delivery_gap",
+            Self::Closing { .. } => "closing",
+            Self::Closed { .. } => "closed",
+            Self::Error { .. } => "error",
+            Self::Result { .. } => "result",
+            Self::CommandError { .. } => "command_error",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WireCommandResult {
+    Node {
+        node: NodeHandle,
+    },
+    Texture {
+        texture: TextureHandle,
+    },
+    Overlaps {
+        overlapping: bool,
+        nodes: Vec<NodeHandle>,
+    },
+    Acknowledged,
+}
+
+impl WireCommandResult {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Node { .. } => "node",
+            Self::Texture { .. } => "texture",
+            Self::Overlaps { .. } => "overlaps",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+}
+
+#[derive(Default)]
+struct FrameReader {
+    bytes: Vec<u8>,
+}
+
+enum WireFrame {
+    Json(Vec<u8>),
+    Binary,
+}
+
+impl FrameReader {
+    fn read_json(&mut self, stream: &mut LocalSocketStream) -> Result<WireHostMessage> {
+        loop {
+            if let Some(frame) = self.take_complete_frame()? {
+                return decode_json(frame);
+            }
+            let mut received = [0_u8; 8192];
+            match stream.read(&mut received) {
+                Ok(0) => {
+                    if empty_read_is_disconnected(stream)? {
+                        return Err(Error::Protocol("the CLP transport disconnected".to_owned()));
+                    }
+                    thread::sleep(IO_RETRY_INTERVAL);
+                }
+                Ok(count) => self.bytes.extend_from_slice(&received[..count]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if read_disconnected(&error) => {
+                    return Err(Error::Protocol("the CLP transport disconnected".to_owned()));
+                }
+                Err(error) if read_would_block(&error) => thread::sleep(IO_RETRY_INTERVAL),
+                Err(error) => return Err(Error::Io(error)),
+            }
+        }
+    }
+
+    fn try_read_json(&mut self, stream: &mut LocalSocketStream) -> Result<Option<WireHostMessage>> {
+        loop {
+            if let Some(frame) = self.take_complete_frame()? {
+                return decode_json(frame).map(Some);
+            }
+            let mut received = [0_u8; 8192];
+            match stream.read(&mut received) {
+                Ok(0) => {
+                    if empty_read_is_disconnected(stream)? {
+                        return Err(Error::Protocol("the CLP transport disconnected".to_owned()));
+                    }
+                    return Ok(None);
+                }
+                Ok(count) => self.bytes.extend_from_slice(&received[..count]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if read_disconnected(&error) => {
+                    return Err(Error::Protocol("the CLP transport disconnected".to_owned()));
+                }
+                Err(error) if read_would_block(&error) => return Ok(None),
+                Err(error) => return Err(Error::Io(error)),
+            }
+        }
+    }
+
+    fn take_complete_frame(&mut self) -> Result<Option<WireFrame>> {
+        if self.bytes.len() < 4 {
+            return Ok(None);
+        }
+        let length = usize::try_from(u32::from_be_bytes(
+            self.bytes[..4].try_into().expect("frame length is present"),
+        ))
+        .map_err(|_| Error::Protocol("frame length does not fit this platform".to_owned()))?;
+        if length > MAX_FRAME_BYTES {
+            return Err(Error::Protocol(format!(
+                "frame length {length} exceeds {MAX_FRAME_BYTES}"
+            )));
+        }
+        if length == 0 {
+            return Err(Error::Protocol(
+                "frame is missing its kind discriminator".to_owned(),
+            ));
+        }
+        let frame_end = 4_usize
+            .checked_add(length)
+            .ok_or_else(|| Error::Protocol("frame length overflows this platform".to_owned()))?;
+        if self.bytes.len() < frame_end {
+            return Ok(None);
+        }
+        let frame = match self.bytes[4] {
+            b'J' => WireFrame::Json(self.bytes[5..frame_end].to_vec()),
+            b'B' => WireFrame::Binary,
+            _ => Err(Error::Protocol(
+                "frame has an unknown kind discriminator".to_owned(),
+            ))?,
+        };
+        self.bytes.drain(..frame_end);
+        Ok(Some(frame))
+    }
+}
+
+fn read_json(stream: &mut LocalSocketStream, reader: &mut FrameReader) -> Result<WireHostMessage> {
+    reader.read_json(stream)
+}
+
+fn decode_json(frame: WireFrame) -> Result<WireHostMessage> {
+    let WireFrame::Json(payload) = frame else {
+        return Err(Error::Protocol(
+            "expected a JSON frame from the host".to_owned(),
+        ));
+    };
+    Ok(serde_json::from_slice(&payload)?)
+}
+
+fn write_json(stream: &mut LocalSocketStream, message: &impl Serialize) -> Result<()> {
+    write_frame(stream, b'J', &serde_json::to_vec(message)?)
+}
+
+fn write_frame(stream: &mut LocalSocketStream, kind: u8, payload: &[u8]) -> Result<()> {
+    let length = payload
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| Error::InvalidInput("frame length overflow".to_owned()))?;
+    if length > MAX_FRAME_BYTES {
+        return Err(Error::InvalidInput(format!(
+            "frame length {length} exceeds {MAX_FRAME_BYTES}"
+        )));
+    }
+    let length = u32::try_from(length)
+        .map_err(|_| Error::InvalidInput("frame length exceeds u32".to_owned()))?;
+    write_all_resilient(stream, &length.to_be_bytes())?;
+    write_all_resilient(stream, &[kind])?;
+    write_all_resilient(stream, payload)
+}
+
+fn write_all_resilient(stream: &mut LocalSocketStream, mut bytes: &[u8]) -> Result<()> {
+    let deadline = Instant::now() + IO_STALL_TIMEOUT;
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => wait_for_write_capacity(deadline)?,
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if read_would_block(&error) => wait_for_write_capacity(deadline)?,
+            Err(error) => return Err(Error::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_write_capacity(deadline: Instant) -> Result<()> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the CLP peer stopped reading",
+            ))
+        })?;
+    thread::sleep(remaining.min(IO_RETRY_INTERVAL));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn empty_read_is_disconnected(stream: &LocalSocketStream) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::{
+        Foundation::{ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED},
+        System::Pipes::PeekNamedPipe,
+    };
+
+    let LocalSocketStream::NamedPipe(pipe) = stream;
+    let available = unsafe {
+        PeekNamedPipe(
+            pipe.inner().as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if available != 0 {
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(code)
+            if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32 =>
+        {
+            Ok(true)
+        }
+        _ => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn empty_read_is_disconnected(_: &LocalSocketStream) -> io::Result<bool> {
+    Ok(true)
+}
+
+fn read_disconnected(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn read_would_block(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        error.raw_os_error() == Some(232)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+fn parse_duration(value: String) -> Result<Duration> {
+    let nanoseconds = value
+        .parse::<u64>()
+        .map_err(|_| Error::Protocol(format!("invalid duration nanoseconds {value:?}")))?;
+    Ok(Duration::from_nanos(nanoseconds))
+}
+
+fn rgba8_byte_len(width: u32, height: u32) -> Result<usize> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| Error::InvalidInput("texture dimensions overflow".to_owned()))?;
+    let bytes = pixels
+        .checked_mul(4)
+        .ok_or_else(|| Error::InvalidInput("RGBA8 texture byte count overflows".to_owned()))?;
+    usize::try_from(bytes).map_err(|_| {
+        Error::InvalidInput("texture byte count does not fit this platform".to_owned())
+    })
+}
+
+fn unexpected(expected: &str, received: &str) -> Error {
+    Error::Protocol(format!("expected {expected}, received {received}"))
+}
+
+fn unexpected_command_result(expected: &str, received: &str) -> Error {
+    Error::Protocol(format!(
+        "expected {expected} command result, received {received}"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn serializes_a_v13_hello_with_deterministic_capabilities() {
+        let message = WireClientMessage::Hello {
+            protocol: CLP_PROTOCOL_VERSION,
+            token: "secret".to_owned(),
+            capabilities: Capabilities::from([Capability::Timing, Capability::Scene])
+                .iter()
+                .collect(),
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "hello",
+                "protocol": { "major": 1, "minor": 3 },
+                "token": "secret",
+                "capabilities": ["scene", "timing"]
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_an_overlap_query_with_an_opaque_handle() {
+        let message = WireClientMessage::Command {
+            request_id: "sdk-7".to_owned(),
+            command: WireSceneCommand::QueryOverlaps {
+                node: NodeHandle("node-42".to_owned()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "command",
+                "request_id": "sdk-7",
+                "command": { "op": "query_overlaps", "node": "node-42" }
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_overlap_and_close_notifications() {
+        let event: WireHostMessage = serde_json::from_value(json!({
+            "type": "event",
+            "session_id": "session-1",
+            "event": { "kind": "scene", "event": { "kind": "overlap_enter", "first": "node-2", "second": "node-3" } }
+        }))
+        .unwrap();
+        let WireHostMessage::Event {
+            event:
+                Event::Scene {
+                    event: SceneEvent::OverlapEnter { first, second },
+                },
+            ..
+        } = event
+        else {
+            panic!("unexpected event");
+        };
+        assert_eq!(first.as_str(), "node-2");
+        assert_eq!(second.as_str(), "node-3");
+
+        let closed: WireHostMessage = serde_json::from_value(json!({
+            "type": "closed",
+            "session_id": "session-1",
+            "reason": { "kind": "host_shutdown" }
+        }))
+        .unwrap();
+        assert!(matches!(
+            closed,
+            WireHostMessage::Closed {
+                reason: CloseReason::HostShutdown,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn frame_reader_accepts_fragmented_json() {
+        let payload = br#"{"type":"tick","session_id":"session-1","dt_ns":"16"}"#;
+        let mut reader = FrameReader::default();
+        let length = u32::try_from(payload.len() + 1).unwrap().to_be_bytes();
+        reader.bytes.extend_from_slice(&length[..2]);
+        assert!(reader.take_complete_frame().unwrap().is_none());
+        reader.bytes.extend_from_slice(&length[2..]);
+        reader.bytes.push(b'J');
+        reader.bytes.extend_from_slice(payload);
+        let WireFrame::Json(frame) = reader.take_complete_frame().unwrap().unwrap() else {
+            panic!("expected JSON frame");
+        };
+        let message: WireHostMessage = serde_json::from_slice(&frame).unwrap();
+        assert!(matches!(message, WireHostMessage::Tick { dt_ns, .. } if dt_ns == "16"));
+    }
+
+    #[test]
+    fn validates_rgba8_lengths_before_writing() {
+        assert_eq!(rgba8_byte_len(2, 3).unwrap(), 24);
+        assert!(rgba8_byte_len(u32::MAX, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn parses_duration_without_precision_loss() {
+        assert_eq!(
+            parse_duration("18446744073709551615".to_owned()).unwrap(),
+            Duration::from_nanos(u64::MAX)
+        );
+        assert!(parse_duration("1.5".to_owned()).is_err());
+    }
+}
