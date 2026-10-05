@@ -5,7 +5,7 @@ use std::{
 
 use chymeral_rust_sdk::{
     Capabilities, Client, CloseReason, NodeContent, NodeProperties, NodePropertiesPatch,
-    Notification, SceneLayer, Subscription,
+    Notification, SceneLayer, Subscription, TextNodeProperties, TextStyle,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -40,6 +40,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
 
+    let text = client.create_text_root(
+        SceneLayer::Overlay,
+        TextNodeProperties::new(32.0, 32.0),
+        "a\tb\n界",
+        TextStyle::default(),
+    )?;
+    if text.metrics.columns != 9 || text.metrics.rows != 2 {
+        return Err("text node metrics did not follow terminal-cell layout".into());
+    }
+    let updated_text = client.set_text(&text.node, "updated\n")?;
+    if updated_text.columns != 7 || updated_text.rows != 2 {
+        return Err("text update did not recompute intrinsic metrics".into());
+    }
+    let styled_text = client.set_text_style(
+        &text.node,
+        TextStyle {
+            size: Some(20.0),
+            ..TextStyle::default()
+        },
+    )?;
+    if styled_text.columns != updated_text.columns
+        || styled_text.rows != updated_text.rows
+        || !styled_text.width.is_finite()
+        || !styled_text.height.is_finite()
+        || styled_text.width <= 0.0
+        || styled_text.height <= 0.0
+    {
+        return Err("text style update returned invalid intrinsic metrics".into());
+    }
+
     let collider = client.create_root(
         SceneLayer::Overlay,
         NodeProperties {
@@ -73,6 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     client.remove_node(&mover)?;
     client.remove_node(&collider)?;
+    client.remove_node(&text.node)?;
     client.remove_node(&visual)?;
     client.destroy_texture(&texture)?;
     let reason = client.close()?;

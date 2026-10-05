@@ -10,7 +10,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         Capability::Scene,
         Capability::Input,
         Capability::Overlap,
+        Capability::ExternalDrop,
     ]))?;
+    let external_drop_available = client.has_capability(Capability::ExternalDrop);
     let blue = client.create_root(
         SceneLayer::Overlay,
         NodeProperties {
@@ -19,6 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             width: 190.0,
             height: 190.0,
             overlap_enabled: true,
+            external_drop_enabled: external_drop_available,
             ..NodeProperties::new(0.0, 0.0, 0.0, 0.0)
         },
         NodeContent::Solid {
@@ -41,9 +44,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
     println!(
-        "CLP v{} probe connected. Drag the orange node onto the blue node, then press q to close.",
+        "CLP v{} probe connected. Drag the orange node onto the blue node, drop a desktop file on blue, then press q to close.",
         client.session().protocol_version
     );
+    if external_drop_available {
+        println!(
+            "The blue node is an external-drop target. Files dropped elsewhere use terminal fallback."
+        );
+    } else {
+        println!(
+            "The active Chymeral backend does not offer external file drops; the blue node still tests overlap."
+        );
+    }
     println!("The program only exits when q is pressed while both nodes overlap.");
 
     let mut drag_offset = None;
@@ -111,6 +123,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                 event: SceneEvent::OverlapLeave { first, second },
             }) if (first == orange && second == blue) || (first == blue && second == orange) => {
                 println!("Overlap left.");
+            }
+            Notification::Event(Event::Scene {
+                event: SceneEvent::ExternalDropEnter { target, position },
+            }) if target == blue => {
+                println!(
+                    "External file drag entered blue node at ({:.0}, {:.0}).",
+                    position.x, position.y
+                );
+            }
+            Notification::Event(Event::Scene {
+                event: SceneEvent::ExternalDropLeave { target, position },
+            }) if target == blue => {
+                println!(
+                    "External file drag left blue node at ({:.0}, {:.0}).",
+                    position.x, position.y
+                );
+            }
+            Notification::Event(Event::Scene {
+                event:
+                    SceneEvent::ExternalDrop {
+                        target,
+                        position,
+                        files,
+                    },
+            }) if target == blue => {
+                println!(
+                    "External drop on blue node at ({:.0}, {:.0}):",
+                    position.x, position.y
+                );
+                for file in files {
+                    println!("  {}", file.uri);
+                }
             }
             Notification::Closing(_) => {
                 let _ = client.close()?;

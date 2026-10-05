@@ -1,4 +1,5 @@
-//! A synchronous, dependency-light reference client for CLP v1.3.
+//! A synchronous, dependency-light reference client for CLP v1.3 and the
+//! provisional CLP v1.4 scene-text and external-drop extensions.
 //!
 //! The crate speaks only the public Chymeral Link Protocol. It neither imports
 //! Chymeral internals nor creates a graphics window of its own.
@@ -26,7 +27,7 @@ pub const TOKEN_ENV: &str = "CHYMERAL_CLP_TOKEN";
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// The newest CLP version implemented by this SDK.
-pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 3);
+pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 4);
 const IO_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const IO_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const BINARY_FRAGMENT_BYTES: usize = 64 * 1024;
@@ -67,6 +68,10 @@ pub enum Capability {
     Timing,
     /// Rectangle overlap queries and transitions.
     Overlap,
+    /// Incoming desktop-file drops targeted to opt-in scene nodes.
+    ExternalDrop,
+    /// Intrinsic scene text nodes with terminal-cell layout.
+    Text,
 }
 
 /// A deterministic set of negotiated or requested capabilities.
@@ -79,7 +84,7 @@ impl Capabilities {
         Self::default()
     }
 
-    /// Every CLP v1.3 capability.
+    /// Every capability implemented by this SDK.
     pub fn all() -> Self {
         Self::from([
             Capability::Scene,
@@ -87,6 +92,8 @@ impl Capabilities {
             Capability::Input,
             Capability::Timing,
             Capability::Overlap,
+            Capability::ExternalDrop,
+            Capability::Text,
         ])
     }
 
@@ -228,6 +235,115 @@ pub struct NodeProperties {
     pub z_index: i32,
     /// Enables this node as a rectangular overlap target.
     pub overlap_enabled: bool,
+    /// Allows this node to receive incoming desktop-file drops.
+    pub external_drop_enabled: bool,
+}
+
+/// Complete properties used when creating an intrinsic text node.
+///
+/// Text bounds are derived by Chymeral from the text, style, and terminal-cell
+/// metrics. The origin is the top-left corner of the first text cell.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct TextNodeProperties {
+    /// Local x coordinate in logical pixels.
+    pub x: f64,
+    /// Local y coordinate in logical pixels.
+    pub y: f64,
+    /// Whether the node is drawn. Invisible nodes may still overlap.
+    pub visible: bool,
+    /// Whether children are clipped to the text node's intrinsic bounds.
+    pub clip_children: bool,
+    /// Sibling paint order.
+    pub z_index: i32,
+    /// Enables this node as a rectangular overlap target.
+    pub overlap_enabled: bool,
+    /// Allows this node to receive incoming desktop-file drops.
+    pub external_drop_enabled: bool,
+}
+
+impl TextNodeProperties {
+    /// Creates visible, unclipped text-node properties with default stacking order.
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self {
+            x,
+            y,
+            visible: true,
+            clip_children: false,
+            z_index: 0,
+            overlap_enabled: false,
+            external_drop_enabled: false,
+        }
+    }
+}
+
+/// Horizontal alignment of each explicit text line within the intrinsic width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAlign {
+    /// Align lines to their start edge.
+    #[default]
+    Start,
+    /// Center lines within the widest line's cell width.
+    Center,
+    /// Align lines to their end edge.
+    End,
+}
+
+/// Font weight for an intrinsic text node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextWeight {
+    /// The terminal's normal font weight.
+    #[default]
+    Normal,
+    /// The terminal's bold font weight.
+    Bold,
+}
+
+/// Optional presentation values for an intrinsic text node.
+///
+/// Omitted fields inherit the terminal font, size, line height, and foreground
+/// color. `font` must name a `scene_text.fonts` alias configured by the host.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TextStyle {
+    /// Optional explicit font alias from Chymeral configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    /// Optional font size in logical pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    /// Optional line height in logical pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
+    /// Optional RGBA8 text color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 4]>,
+    /// Font weight.
+    pub weight: TextWeight,
+    /// Explicit-line alignment.
+    pub align: TextAlign,
+}
+
+/// Host-computed terminal-cell metrics for an intrinsic text node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+pub struct TextMetrics {
+    /// Width of the widest explicit line in terminal cells.
+    pub columns: u32,
+    /// Number of explicit lines, including a trailing empty line after `\n`.
+    pub rows: u32,
+    /// Intrinsic width in logical pixels.
+    pub width: f64,
+    /// Intrinsic height in logical pixels.
+    pub height: f64,
+}
+
+/// A newly created intrinsic text node and its host-computed metrics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextNode {
+    /// Opaque node handle.
+    pub node: NodeHandle,
+    /// Initial intrinsic text metrics.
+    pub metrics: TextMetrics,
 }
 
 impl NodeProperties {
@@ -242,6 +358,7 @@ impl NodeProperties {
             clip_children: false,
             z_index: 0,
             overlap_enabled: false,
+            external_drop_enabled: false,
         }
     }
 }
@@ -273,6 +390,9 @@ pub struct NodePropertiesPatch {
     /// Optional overlap flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap_enabled: Option<bool>,
+    /// Optional external-file-drop target flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_drop_enabled: Option<bool>,
 }
 
 /// Visual content for a scene node.
@@ -563,6 +683,25 @@ pub enum SceneEvent {
         first: NodeHandle,
         second: NodeHandle,
     },
+    /// An external file drag entered an opt-in node.
+    ExternalDropEnter { target: NodeHandle, position: Vec2 },
+    /// An external file drag moved over an opt-in node.
+    ExternalDropOver { target: NodeHandle, position: Vec2 },
+    /// An external file drag left an opt-in node.
+    ExternalDropLeave { target: NodeHandle, position: Vec2 },
+    /// Desktop files were dropped on an opt-in node.
+    ExternalDrop {
+        target: NodeHandle,
+        position: Vec2,
+        files: Vec<ExternalFile>,
+    },
+}
+
+/// A desktop file delivered to an opt-in scene node.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ExternalFile {
+    /// Canonical percent-encoded `file:` URI supplied by Chymeral.
+    pub uri: String,
 }
 
 /// An input or scene event from Chymeral.
@@ -724,7 +863,7 @@ impl From<serde_json::Error> for Error {
 /// Result type returned by public SDK operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A synchronous CLP v1.3 client.
+/// A synchronous CLP client, including provisional CLP v1.4 scene-text and external-drop APIs.
 ///
 /// `connect_from_env` completes the `hello → init → init_complete → start →
 /// started` handshake. Its returned [`SessionInfo`] preserves the data from
@@ -912,6 +1051,84 @@ impl Client {
         }
     }
 
+    /// Creates a root intrinsic text node and returns its handle and metrics.
+    pub fn create_text_root(
+        &mut self,
+        layer: SceneLayer,
+        properties: TextNodeProperties,
+        text: impl Into<String>,
+        style: TextStyle,
+    ) -> Result<TextNode> {
+        self.require_text_properties(&properties)?;
+        match self.command(
+            WireSceneCommand::CreateTextRoot {
+                layer,
+                properties,
+                text: text.into(),
+                style,
+            },
+            None,
+        )? {
+            WireCommandResult::TextNode { node, metrics } => Ok(TextNode { node, metrics }),
+            result => Err(unexpected_command_result("text_node", result.name())),
+        }
+    }
+
+    /// Creates an intrinsic text child and returns its handle and metrics.
+    pub fn create_text_child(
+        &mut self,
+        parent: &NodeHandle,
+        properties: TextNodeProperties,
+        text: impl Into<String>,
+        style: TextStyle,
+    ) -> Result<TextNode> {
+        self.require_text_properties(&properties)?;
+        match self.command(
+            WireSceneCommand::CreateTextChild {
+                parent: parent.clone(),
+                properties,
+                text: text.into(),
+                style,
+            },
+            None,
+        )? {
+            WireCommandResult::TextNode { node, metrics } => Ok(TextNode { node, metrics }),
+            result => Err(unexpected_command_result("text_node", result.name())),
+        }
+    }
+
+    /// Replaces text and returns the resulting intrinsic metrics.
+    pub fn set_text(&mut self, node: &NodeHandle, text: impl Into<String>) -> Result<TextMetrics> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::Text)?;
+        match self.command(
+            WireSceneCommand::SetText {
+                node: node.clone(),
+                text: text.into(),
+            },
+            None,
+        )? {
+            WireCommandResult::TextMetrics { metrics } => Ok(metrics),
+            result => Err(unexpected_command_result("text_metrics", result.name())),
+        }
+    }
+
+    /// Replaces a text node's style and returns the resulting intrinsic metrics.
+    pub fn set_text_style(&mut self, node: &NodeHandle, style: TextStyle) -> Result<TextMetrics> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::Text)?;
+        match self.command(
+            WireSceneCommand::SetTextStyle {
+                node: node.clone(),
+                style,
+            },
+            None,
+        )? {
+            WireCommandResult::TextMetrics { metrics } => Ok(metrics),
+            result => Err(unexpected_command_result("text_metrics", result.name())),
+        }
+    }
+
     /// Updates selected node properties.
     pub fn update_node(
         &mut self,
@@ -921,6 +1138,9 @@ impl Client {
         self.require(Capability::Scene)?;
         if properties.overlap_enabled.is_some() {
             self.require(Capability::Overlap)?;
+        }
+        if properties.external_drop_enabled.is_some() {
+            self.require(Capability::ExternalDrop)?;
         }
         Self::expect_acknowledged(self.command(
             WireSceneCommand::UpdateNode {
@@ -1275,6 +1495,21 @@ impl Client {
         if properties.overlap_enabled {
             self.require(Capability::Overlap)?;
         }
+        if properties.external_drop_enabled {
+            self.require(Capability::ExternalDrop)?;
+        }
+        Ok(())
+    }
+
+    fn require_text_properties(&self, properties: &TextNodeProperties) -> Result<()> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::Text)?;
+        if properties.overlap_enabled {
+            self.require(Capability::Overlap)?;
+        }
+        if properties.external_drop_enabled {
+            self.require(Capability::ExternalDrop)?;
+        }
         Ok(())
     }
 
@@ -1351,6 +1586,26 @@ enum WireSceneCommand {
     SetContent {
         node: NodeHandle,
         content: NodeContent,
+    },
+    CreateTextRoot {
+        layer: SceneLayer,
+        properties: TextNodeProperties,
+        text: String,
+        style: TextStyle,
+    },
+    CreateTextChild {
+        parent: NodeHandle,
+        properties: TextNodeProperties,
+        text: String,
+        style: TextStyle,
+    },
+    SetText {
+        node: NodeHandle,
+        text: String,
+    },
+    SetTextStyle {
+        node: NodeHandle,
+        style: TextStyle,
     },
     Reparent {
         node: NodeHandle,
@@ -1460,12 +1715,19 @@ enum WireCommandResult {
     Node {
         node: NodeHandle,
     },
+    TextNode {
+        node: NodeHandle,
+        metrics: TextMetrics,
+    },
     Texture {
         texture: TextureHandle,
     },
     Overlaps {
         overlapping: bool,
         nodes: Vec<NodeHandle>,
+    },
+    TextMetrics {
+        metrics: TextMetrics,
     },
     Acknowledged,
 }
@@ -1474,8 +1736,10 @@ impl WireCommandResult {
     fn name(&self) -> &'static str {
         match self {
             Self::Node { .. } => "node",
+            Self::TextNode { .. } => "text_node",
             Self::Texture { .. } => "texture",
             Self::Overlaps { .. } => "overlaps",
+            Self::TextMetrics { .. } => "text_metrics",
             Self::Acknowledged => "acknowledged",
         }
     }
@@ -1732,7 +1996,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn serializes_a_v13_hello_with_deterministic_capabilities() {
+    fn serializes_a_v14_hello_with_deterministic_capabilities() {
         let message = WireClientMessage::Hello {
             protocol: CLP_PROTOCOL_VERSION,
             token: "secret".to_owned(),
@@ -1744,7 +2008,7 @@ mod tests {
             serde_json::to_value(message).unwrap(),
             json!({
                 "type": "hello",
-                "protocol": { "major": 1, "minor": 3 },
+                "protocol": { "major": 1, "minor": 4 },
                 "token": "secret",
                 "capabilities": ["scene", "timing"]
             })
@@ -1767,6 +2031,122 @@ mod tests {
                 "command": { "op": "query_overlaps", "node": "node-42" }
             })
         );
+    }
+
+    #[test]
+    fn serializes_an_external_drop_opt_in_node() {
+        let message = WireClientMessage::Command {
+            request_id: "sdk-8".to_owned(),
+            command: WireSceneCommand::CreateRoot {
+                layer: SceneLayer::Overlay,
+                properties: NodeProperties {
+                    external_drop_enabled: true,
+                    ..NodeProperties::new(1.0, 2.0, 30.0, 40.0)
+                },
+                content: NodeContent::Empty,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "command",
+                "request_id": "sdk-8",
+                "command": {
+                    "op": "create_root",
+                    "layer": "overlay",
+                    "properties": {
+                        "x": 1.0,
+                        "y": 2.0,
+                        "width": 30.0,
+                        "height": 40.0,
+                        "visible": true,
+                        "clip_children": false,
+                        "z_index": 0,
+                        "overlap_enabled": false,
+                        "external_drop_enabled": true
+                    },
+                    "content": { "kind": "empty" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_intrinsic_text_commands() {
+        let message = WireClientMessage::Command {
+            request_id: "sdk-9".to_owned(),
+            command: WireSceneCommand::CreateTextRoot {
+                layer: SceneLayer::Overlay,
+                properties: TextNodeProperties {
+                    overlap_enabled: true,
+                    ..TextNodeProperties::new(24.0, 48.0)
+                },
+                text: "a\tb\n界".to_owned(),
+                style: TextStyle {
+                    color: Some([30, 200, 255, 255]),
+                    weight: TextWeight::Bold,
+                    align: TextAlign::Center,
+                    ..TextStyle::default()
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "command",
+                "request_id": "sdk-9",
+                "command": {
+                    "op": "create_text_root",
+                    "layer": "overlay",
+                    "properties": {
+                        "x": 24.0,
+                        "y": 48.0,
+                        "visible": true,
+                        "clip_children": false,
+                        "z_index": 0,
+                        "overlap_enabled": true,
+                        "external_drop_enabled": false
+                    },
+                    "text": "a\tb\n界",
+                    "style": {
+                        "color": [30, 200, 255, 255],
+                        "weight": "bold",
+                        "align": "center"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_text_node_results() {
+        let message: WireHostMessage = serde_json::from_value(json!({
+            "type": "result",
+            "request_id": "sdk-9",
+            "result": {
+                "kind": "text_node",
+                "node": "node-4",
+                "metrics": {
+                    "columns": 9,
+                    "rows": 2,
+                    "width": 86.4,
+                    "height": 40.0
+                }
+            }
+        }))
+        .unwrap();
+        let WireHostMessage::Result {
+            result: WireCommandResult::TextNode { node, metrics },
+            ..
+        } = message
+        else {
+            panic!("unexpected command result");
+        };
+        assert_eq!(node.as_str(), "node-4");
+        assert_eq!(metrics.columns, 9);
+        assert_eq!(metrics.rows, 2);
+        assert_eq!(metrics.width, 86.4);
+        assert_eq!(metrics.height, 40.0);
     }
 
     #[test]
@@ -1803,6 +2183,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn decodes_external_drop_notifications() {
+        let event: WireHostMessage = serde_json::from_value(json!({
+            "type": "event",
+            "session_id": "session-1",
+            "event": {
+                "kind": "scene",
+                "event": {
+                    "kind": "external_drop",
+                    "target": "node-7",
+                    "position": { "x": 12.0, "y": 24.0 },
+                    "files": [
+                        { "uri": "file:///tmp/a%20file.txt" },
+                        { "uri": "file:///tmp/b.txt" }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let WireHostMessage::Event {
+            event:
+                Event::Scene {
+                    event:
+                        SceneEvent::ExternalDrop {
+                            target,
+                            position,
+                            files,
+                        },
+                },
+            ..
+        } = event
+        else {
+            panic!("unexpected event");
+        };
+        assert_eq!(target.as_str(), "node-7");
+        assert_eq!(position, Vec2 { x: 12.0, y: 24.0 });
+        assert_eq!(
+            files,
+            vec![
+                ExternalFile {
+                    uri: "file:///tmp/a%20file.txt".to_owned(),
+                },
+                ExternalFile {
+                    uri: "file:///tmp/b.txt".to_owned(),
+                },
+            ]
+        );
     }
 
     #[test]

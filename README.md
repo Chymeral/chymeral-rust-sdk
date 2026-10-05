@@ -7,7 +7,10 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The current implementation supports **CLP v1.3** and is synchronous by design.
+The stable implementation supports **CLP v1.3**. It also includes the
+provisional **CLP v1.4** `external_drop` and intrinsic scene-text APIs for
+M16/M17 validation; M19 will freeze their public contracts. The SDK is
+synchronous by design.
 It has no async-runtime dependency. Its package is not published to crates.io
 yet (`publish = false`); use a local path dependency while developing against
 this repository.
@@ -20,10 +23,14 @@ this repository.
   host notifications.
 - Typed scene commands for roots, children, property changes, content changes,
   reparenting, removal, and overlap queries.
+- Intrinsic scene-text nodes with terminal-cell metrics, text/style updates,
+  and default terminal typography.
 - Session-owned RGBA8 texture upload and destruction.
+- Provisional incoming external-file-drop events for opt-in scene nodes.
 - Opaque `NodeHandle` and `TextureHandle` values that cannot be confused with
   host implementation identifiers.
-- `clp_conformance` and `clp_probe` examples for automated and visual checks.
+- `clp_conformance`, `clp_probe`, and `clp_text_probe` examples for automated
+  and visual checks.
 
 ## Requirements
 
@@ -31,6 +38,9 @@ this repository.
 - A Chymeral window already running on Linux or Windows.
 - The application must be launched from the shell inside that Chymeral window
   so it inherits `CHYMERAL_CLP_ENDPOINT` and `CHYMERAL_CLP_TOKEN`.
+- Incoming external file drops require a Windows or X11/XWayland Chymeral
+  backend while M16 remains on stable `winit 0.30`; native Wayland does not
+  grant `Capability::ExternalDrop`.
 
 Starting the program from an ordinary terminal is valid Rust execution, but
 `connect_from_env` will correctly return `MissingEnvironment` because no CLP
@@ -94,8 +104,10 @@ protocol version, session identifier, granted capabilities, and launch context.
 | Connection | `Client::connect_from_env`, `Client::connect`, `session`, `has_capability` |
 | Subscriptions | `subscribe` with `RawInput`, `Terminal`, and `Timing` |
 | Nodes | `create_root`, `create_child`, `update_node`, `set_content`, `reparent`, `remove_node` |
+| Text (draft) | `create_text_root`, `create_text_child`, `set_text`, `set_text_style` |
 | Textures | `upload_texture`, `destroy_texture` |
 | Overlap | `query_overlaps`, `NodeProperties::overlap_enabled` |
+| External drop (draft) | `Capability::ExternalDrop`, `external_drop_enabled`, `SceneEvent::ExternalDrop` |
 | Delivery | `next_notification`, `try_next_notification` |
 | Termination | `report_fault`, `close` |
 
@@ -128,6 +140,21 @@ property patch. `query_overlaps` returns current same-session contacts, while
 This is geometry, not a physics engine: visibility, clipping, paint order, and
 image alpha do not affect the rectangle test.
 
+## Intrinsic scene text
+
+Request `Capability::Scene` and `Capability::Text`, then create a text root or
+child with `TextNodeProperties`, text, and `TextStyle`. The node origin is the
+top-left corner of its first cell. Chymeral computes its rectangle from the
+widest explicit line and number of rows, using the terminal cell width and line
+height; the creation and update calls return those metrics.
+
+Text accepts printable Unicode, `\n`, and tabs at local eight-cell stops. It
+does not wrap or ellipsize. Empty text has a `0 × 0` intrinsic rectangle; a
+trailing newline creates an additional blank row. Omitting all `TextStyle`
+fields uses the terminal font, size, line height, and foreground color. A
+custom `font` is an explicit `scene_text.fonts` alias from `chymeral.toml`, not
+a host-system family lookup.
+
 ## Validation
 
 From a terminal inside Chymeral, run:
@@ -135,15 +162,25 @@ From a terminal inside Chymeral, run:
 ```text
 cargo run --example clp_conformance
 cargo run --example clp_probe
+cargo run --example clp_text_probe
 ```
 
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
 resource upload and destruction, scene mutation, overlap queries, and a clean
 close. It must return to the same terminal without closing it.
 
-`clp_probe` creates orange and blue nodes. Drag orange onto blue, observe the
-overlap transitions, then press `q` while they overlap. The probe session exits;
-the Chymeral terminal stays alive.
+`clp_probe` creates orange and blue nodes. Drag orange onto blue and observe
+the overlap transitions. The blue node opts into draft external drops: dropping
+a desktop file on it prints its canonical `file:` URI, while a drop outside it
+falls back to terminal insertion. Press `q` while both nodes overlap to close
+only the probe session; the Chymeral terminal stays alive.
+
+`clp_text_probe` creates a panel with text children. Confirm their local
+offsets, tabs, Unicode width, and line alignment; press `u` to change text,
+`b` to apply bold/end alignment, and `q` to close only the probe session.
+Set `CHYMERAL_TEXT_PROBE_FONT_ALIAS` to an alias declared by the host under
+`scene_text.fonts` to make the probe request that explicit file-backed font;
+when it is unset, the probe uses terminal font defaults.
 
 The repository CI validates Rust 1.85 and stable Rust on Linux and Windows. It
 runs formatting, all targets, Clippy with warnings denied, and release builds
