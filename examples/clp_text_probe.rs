@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use chymeral_rust_sdk::{
-    Capabilities, Capability, Client, CloseReason, Event, Key, KeyState, NodeContent,
+    Capabilities, Capability, Client, CloseReason, Event, Key, KeyState, NodeChanges, NodeInput,
     NodeProperties, Notification, SceneLayer, TextAlign, TextNodeProperties, TextStyle, TextWeight,
 };
 
@@ -14,41 +14,57 @@ fn main() -> Result<(), Box<dyn Error>> {
         Capability::Input,
         Capability::Text,
     ]))?;
-    let panel = client.create_root(
-        SceneLayer::Overlay,
-        NodeProperties::new(48.0, 72.0, 620.0, 220.0),
-        NodeContent::Solid {
-            color: [20, 34, 56, 224],
+    let panel = client
+        .create_node(
+            None,
+            Some(SceneLayer::Overlay),
+            NodeInput::Rectangle {
+                properties: NodeProperties::new(48.0, 72.0, 620.0, 220.0),
+                color: [20, 34, 56, 224],
+            },
+        )?
+        .node;
+    let title = client.create_node(
+        Some(&panel),
+        None,
+        NodeInput::Text {
+            properties: TextNodeProperties::new(24.0, 20.0),
+            text: "Chymeral intrinsic text\nPress U to update, B for bold, or Q to close."
+                .to_owned(),
+            style: TextStyle {
+                font: font_alias.clone(),
+                ..TextStyle::default()
+            },
         },
     )?;
-    let title = client.create_text_child(
-        &panel,
-        TextNodeProperties::new(24.0, 20.0),
-        "Chymeral intrinsic text\nPress U to update, B for bold, or Q to close.",
-        TextStyle {
-            font: font_alias.clone(),
-            ..TextStyle::default()
+    let sample = client.create_node(
+        Some(&panel),
+        None,
+        NodeInput::Text {
+            properties: TextNodeProperties::new(24.0, 100.0),
+            text: "Tabs use terminal cells: A\tB\nWide Unicode cell: 界".to_owned(),
+            style: TextStyle {
+                font: font_alias.clone(),
+                color: Some([105, 210, 255, 255]),
+                weight: TextWeight::Normal,
+                align: TextAlign::Center,
+                ..TextStyle::default()
+            },
         },
     )?;
-    let sample = client.create_text_child(
-        &panel,
-        TextNodeProperties::new(24.0, 100.0),
-        "Tabs use terminal cells: A\tB\nWide Unicode cell: 界",
-        TextStyle {
-            font: font_alias.clone(),
-            color: Some([105, 210, 255, 255]),
-            weight: TextWeight::Normal,
-            align: TextAlign::Center,
-            ..TextStyle::default()
-        },
-    )?;
+    let title_metrics = title
+        .text_metrics
+        .expect("a created text node reports intrinsic metrics");
+    let sample_metrics = sample
+        .text_metrics
+        .expect("a created text node reports intrinsic metrics");
     println!(
         "CLP v{} text probe connected. Title: {} columns × {} rows; sample: {} columns × {} rows.",
         client.session().protocol_version,
-        title.metrics.columns,
-        title.metrics.rows,
-        sample.metrics.columns,
-        sample.metrics.rows,
+        title_metrics.columns,
+        title_metrics.rows,
+        sample_metrics.columns,
+        sample_metrics.rows,
     );
     match font_alias.as_deref() {
         Some(alias) => println!(
@@ -66,10 +82,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 state: KeyState::Pressed,
                 ..
             }) if value.eq_ignore_ascii_case("u") => {
-                let metrics = client.set_text(
-                    &title.node,
-                    "Updated text node\nIts intrinsic rectangle was recomputed.",
-                )?;
+                let metrics = client
+                    .set_node(
+                        &title.node,
+                        NodeChanges {
+                            text: Some(
+                                "Updated text node\nIts intrinsic rectangle was recomputed."
+                                    .to_owned(),
+                            ),
+                            ..NodeChanges::default()
+                        },
+                    )?
+                    .expect("text changes report intrinsic metrics");
                 println!(
                     "Text updated: {} columns × {} rows ({} × {} logical pixels).",
                     metrics.columns, metrics.rows, metrics.width, metrics.height
@@ -80,16 +104,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 state: KeyState::Pressed,
                 ..
             }) if value.eq_ignore_ascii_case("b") => {
-                let metrics = client.set_text_style(
-                    &sample.node,
-                    TextStyle {
-                        font: font_alias.clone(),
-                        color: Some([255, 196, 94, 255]),
-                        weight: TextWeight::Bold,
-                        align: TextAlign::End,
-                        ..TextStyle::default()
-                    },
-                )?;
+                let metrics = client
+                    .set_node(
+                        &sample.node,
+                        NodeChanges {
+                            text_style: Some(TextStyle {
+                                font: font_alias.clone(),
+                                color: Some([255, 196, 94, 255]),
+                                weight: TextWeight::Bold,
+                                align: TextAlign::End,
+                                ..TextStyle::default()
+                            }),
+                            ..NodeChanges::default()
+                        },
+                    )?
+                    .expect("text-style changes report intrinsic metrics");
                 println!(
                     "Sample style updated: {} columns × {} rows.",
                     metrics.columns, metrics.rows

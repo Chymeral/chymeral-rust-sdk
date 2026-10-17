@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use chymeral_rust_sdk::{
-    Capabilities, Capability, Client, CloseReason, Event, Key, KeyState, NodeContent,
+    Capabilities, Capability, Client, CloseReason, Event, Key, KeyState, NodeChanges, NodeInput,
     NodeProperties, NodePropertiesPatch, Notification, SceneEvent, SceneLayer, Vec2,
 };
 
@@ -13,36 +13,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         Capability::ExternalDrop,
     ]))?;
     let external_drop_available = client.has_capability(Capability::ExternalDrop);
-    let blue = client.create_root(
-        SceneLayer::Overlay,
-        NodeProperties {
-            x: 420.0,
-            y: 150.0,
-            width: 190.0,
-            height: 190.0,
-            overlap_enabled: true,
-            external_drop_enabled: external_drop_available,
-            ..NodeProperties::new(0.0, 0.0, 0.0, 0.0)
-        },
-        NodeContent::Solid {
-            color: [45, 135, 220, 230],
-        },
-    )?;
+    let blue = client
+        .create_node(
+            None,
+            Some(SceneLayer::Overlay),
+            NodeInput::Rectangle {
+                properties: NodeProperties {
+                    x: 420.0,
+                    y: 150.0,
+                    width: 190.0,
+                    height: 190.0,
+                    overlap_enabled: true,
+                    external_drop_enabled: external_drop_available,
+                    ..NodeProperties::new(0.0, 0.0, 0.0, 0.0)
+                },
+                color: [45, 135, 220, 230],
+            },
+        )?
+        .node;
     let mut orange_position = Vec2 { x: 140.0, y: 190.0 };
-    let orange = client.create_root(
-        SceneLayer::Overlay,
-        NodeProperties {
-            x: orange_position.x,
-            y: orange_position.y,
-            width: 96.0,
-            height: 96.0,
-            overlap_enabled: true,
-            ..NodeProperties::new(0.0, 0.0, 0.0, 0.0)
-        },
-        NodeContent::Solid {
-            color: [245, 135, 35, 255],
-        },
-    )?;
+    let orange = client
+        .create_node(
+            None,
+            Some(SceneLayer::Overlay),
+            NodeInput::Rectangle {
+                properties: NodeProperties {
+                    x: orange_position.x,
+                    y: orange_position.y,
+                    width: 96.0,
+                    height: 96.0,
+                    overlap_enabled: true,
+                    ..NodeProperties::new(0.0, 0.0, 0.0, 0.0)
+                },
+                color: [245, 135, 35, 255],
+            },
+        )?
+        .node;
     println!(
         "CLP v{} probe connected. Drag the orange node onto the blue node, drop a desktop file on blue, then press q to close.",
         client.session().protocol_version
@@ -66,8 +72,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 state: KeyState::Pressed,
                 ..
             }) if value.eq_ignore_ascii_case("q") => {
-                let overlaps = client.query_overlaps(&orange)?;
-                if overlaps.nodes.iter().any(|node| node == &blue) {
+                let overlaps = client.get_overlaps(&orange)?;
+                if overlaps.iter().any(|node| node == &blue) {
                     println!("Overlap confirmed; closing only this CLP program session.");
                     let reason = client.close()?;
                     if reason != CloseReason::ClientRequested {
@@ -98,12 +104,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         x: position.x - offset.x,
                         y: position.y - offset.y,
                     };
-                    client.update_node(
+                    client.set_node(
                         &orange,
-                        NodePropertiesPatch {
-                            x: Some(orange_position.x),
-                            y: Some(orange_position.y),
-                            ..NodePropertiesPatch::default()
+                        NodeChanges {
+                            properties: Some(NodePropertiesPatch {
+                                x: Some(orange_position.x),
+                                y: Some(orange_position.y),
+                                ..NodePropertiesPatch::default()
+                            }),
+                            ..NodeChanges::default()
                         },
                     )?;
                 }

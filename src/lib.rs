@@ -1,5 +1,4 @@
-//! A synchronous, dependency-light reference client for CLP v1.3 and the
-//! provisional CLP v1.4 scene-text and external-drop extensions.
+//! A synchronous, dependency-light reference client for CLP v2.0.
 //!
 //! The crate speaks only the public Chymeral Link Protocol. It neither imports
 //! Chymeral internals nor creates a graphics window of its own.
@@ -27,7 +26,7 @@ pub const TOKEN_ENV: &str = "CHYMERAL_CLP_TOKEN";
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// The newest CLP version implemented by this SDK.
-pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 4);
+pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
 const IO_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const IO_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const BINARY_FRAGMENT_BYTES: usize = 64 * 1024;
@@ -60,8 +59,8 @@ impl Display for ProtocolVersion {
 pub enum Capability {
     /// Retained scene nodes and their contents.
     Scene,
-    /// Session-owned RGBA8 textures.
-    Resources,
+    /// Session-owned RGBA8 and GIF image data.
+    Images,
     /// Keyboard, pointer, focus, scene, and terminal input.
     Input,
     /// Tick and frame notifications.
@@ -88,7 +87,7 @@ impl Capabilities {
     pub fn all() -> Self {
         Self::from([
             Capability::Scene,
-            Capability::Resources,
+            Capability::Images,
             Capability::Input,
             Capability::Timing,
             Capability::Overlap,
@@ -156,19 +155,19 @@ impl Display for NodeHandle {
     }
 }
 
-/// An opaque RGBA8 texture handle, valid only in its creating session.
+/// An opaque image handle, valid only in its creating session.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TextureHandle(String);
+pub struct ImageHandle(String);
 
-impl TextureHandle {
-    /// Returns the protocol representation, such as `texture-1`.
+impl ImageHandle {
+    /// Returns the protocol representation, such as `image-1`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl Display for TextureHandle {
+impl Display for ImageHandle {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
     }
@@ -337,13 +336,13 @@ pub struct TextMetrics {
     pub height: f64,
 }
 
-/// A newly created intrinsic text node and its host-computed metrics.
+/// A newly created node and optional metrics for intrinsic text.
 #[derive(Clone, Debug, PartialEq)]
-pub struct TextNode {
+pub struct CreatedNode {
     /// Opaque node handle.
     pub node: NodeHandle,
-    /// Initial intrinsic text metrics.
-    pub metrics: TextMetrics,
+    /// Initial intrinsic text metrics, present only for a text node.
+    pub text_metrics: Option<TextMetrics>,
 }
 
 impl NodeProperties {
@@ -395,33 +394,115 @@ pub struct NodePropertiesPatch {
     pub external_drop_enabled: Option<bool>,
 }
 
-/// Visual content for a scene node.
+/// Complete node data used by [`Client::create_node`].
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NodeContent {
+pub enum NodeInput {
     /// A node without visible content.
-    Empty,
-    /// A solid premultiplied RGBA8 color.
-    Solid {
+    Empty {
+        /// Complete rectangle properties.
+        properties: NodeProperties,
+    },
+    /// A solid RGBA8 rectangle.
+    Rectangle {
+        /// Complete rectangle properties.
+        properties: NodeProperties,
         /// RGBA8 color components.
         color: [u8; 4],
     },
-    /// A texture with independent opacity.
+    /// A static RGBA8 or animated GIF image with independent opacity.
     Image {
-        /// Session-owned RGBA8 texture.
-        texture: TextureHandle,
+        /// Complete rectangle properties.
+        properties: NodeProperties,
+        /// Session-owned image.
+        image: ImageHandle,
+        /// Image opacity in the inclusive range accepted by Chymeral.
+        opacity: f32,
+    },
+    /// Text with host-computed terminal-cell bounds.
+    Text {
+        /// Complete text-node properties without width or height.
+        properties: TextNodeProperties,
+        /// UTF-8 text using terminal-cell layout.
+        text: String,
+        /// Optional text presentation values.
+        style: TextStyle,
+    },
+}
+
+/// A visual replacement accepted by [`NodeChanges`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeVisual {
+    /// A node without visible content.
+    Empty,
+    /// A solid RGBA8 rectangle.
+    Rectangle {
+        /// RGBA8 color components.
+        color: [u8; 4],
+    },
+    /// A static RGBA8 or animated GIF image with independent opacity.
+    Image {
+        /// Session-owned image.
+        image: ImageHandle,
         /// Image opacity in the inclusive range accepted by Chymeral.
         opacity: f32,
     },
 }
 
-/// Result of an overlap query.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OverlapQuery {
-    /// Whether at least one enabled node overlaps the queried node.
-    pub overlapping: bool,
-    /// Intersecting enabled nodes in host-defined deterministic order.
-    pub nodes: Vec<NodeHandle>,
+/// A structural parent change for [`NodeChanges`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeParent {
+    /// Make the node a root.
+    Root,
+    /// Attach the node to another session-owned node.
+    Node {
+        /// Parent node.
+        node: NodeHandle,
+    },
+}
+
+/// An atomic partial node update.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct NodeChanges {
+    /// Partial geometry and interaction-property changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<NodePropertiesPatch>,
+    /// Structural parent change; omit to preserve the current parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<NodeParent>,
+    /// Root drawing-layer change; omit to preserve the current layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<SceneLayer>,
+    /// Visual replacement. Text nodes may not receive visual changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual: Option<NodeVisual>,
+    /// Text replacement. Visual nodes may not receive text changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Text-style replacement. Visual nodes may not receive text changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_style: Option<TextStyle>,
+}
+
+/// Bytes submitted with [`Client::upload_image`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageUpload<'a> {
+    /// Exact RGBA8 pixels in row-major order.
+    Rgba8 {
+        /// Image width in pixels.
+        width: u32,
+        /// Image height in pixels.
+        height: u32,
+        /// Exact `width * height * 4` RGBA8 payload.
+        pixels: &'a [u8],
+    },
+    /// Encoded GIF bytes.
+    Gif {
+        /// Complete encoded GIF payload.
+        bytes: &'a [u8],
+    },
 }
 
 /// A requested host notification subscription.
@@ -863,7 +944,7 @@ impl From<serde_json::Error> for Error {
 /// Result type returned by public SDK operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A synchronous CLP client, including provisional CLP v1.4 scene-text and external-drop APIs.
+/// A synchronous CLP v2.0 client.
 ///
 /// `connect_from_env` completes the `hello → init → init_complete → start →
 /// started` handshake. Its returned [`SessionInfo`] preserves the data from
@@ -1009,171 +1090,51 @@ impl Client {
         }
     }
 
-    /// Creates a root scene node and returns its opaque handle.
-    pub fn create_root(
+    /// Creates a root or child node in the session's implicit scene tree.
+    ///
+    /// `layer` is accepted only for roots; pass `None` for children. Text
+    /// nodes return their host-computed terminal-cell metrics.
+    pub fn create_node(
         &mut self,
-        layer: SceneLayer,
-        properties: NodeProperties,
-        content: NodeContent,
-    ) -> Result<NodeHandle> {
-        self.require_scene_content(&properties, &content)?;
+        parent: Option<&NodeHandle>,
+        layer: Option<SceneLayer>,
+        node: NodeInput,
+    ) -> Result<CreatedNode> {
+        self.require_node_input(&node)?;
         match self.command(
-            WireSceneCommand::CreateRoot {
+            WireSceneCommand::CreateNode {
+                parent: parent.cloned(),
                 layer,
-                properties,
-                content,
+                node,
             },
             None,
         )? {
-            WireCommandResult::Node { node } => Ok(node),
+            WireCommandResult::Node { node, text_metrics } => {
+                Ok(CreatedNode { node, text_metrics })
+            }
             result => Err(unexpected_command_result("node", result.name())),
         }
     }
 
-    /// Creates a child scene node and returns its opaque handle.
-    pub fn create_child(
-        &mut self,
-        parent: &NodeHandle,
-        properties: NodeProperties,
-        content: NodeContent,
-    ) -> Result<NodeHandle> {
-        self.require_scene_content(&properties, &content)?;
-        match self.command(
-            WireSceneCommand::CreateChild {
-                parent: parent.clone(),
-                properties,
-                content,
-            },
-            None,
-        )? {
-            WireCommandResult::Node { node } => Ok(node),
-            result => Err(unexpected_command_result("node", result.name())),
-        }
-    }
-
-    /// Creates a root intrinsic text node and returns its handle and metrics.
-    pub fn create_text_root(
-        &mut self,
-        layer: SceneLayer,
-        properties: TextNodeProperties,
-        text: impl Into<String>,
-        style: TextStyle,
-    ) -> Result<TextNode> {
-        self.require_text_properties(&properties)?;
-        match self.command(
-            WireSceneCommand::CreateTextRoot {
-                layer,
-                properties,
-                text: text.into(),
-                style,
-            },
-            None,
-        )? {
-            WireCommandResult::TextNode { node, metrics } => Ok(TextNode { node, metrics }),
-            result => Err(unexpected_command_result("text_node", result.name())),
-        }
-    }
-
-    /// Creates an intrinsic text child and returns its handle and metrics.
-    pub fn create_text_child(
-        &mut self,
-        parent: &NodeHandle,
-        properties: TextNodeProperties,
-        text: impl Into<String>,
-        style: TextStyle,
-    ) -> Result<TextNode> {
-        self.require_text_properties(&properties)?;
-        match self.command(
-            WireSceneCommand::CreateTextChild {
-                parent: parent.clone(),
-                properties,
-                text: text.into(),
-                style,
-            },
-            None,
-        )? {
-            WireCommandResult::TextNode { node, metrics } => Ok(TextNode { node, metrics }),
-            result => Err(unexpected_command_result("text_node", result.name())),
-        }
-    }
-
-    /// Replaces text and returns the resulting intrinsic metrics.
-    pub fn set_text(&mut self, node: &NodeHandle, text: impl Into<String>) -> Result<TextMetrics> {
-        self.require(Capability::Scene)?;
-        self.require(Capability::Text)?;
-        match self.command(
-            WireSceneCommand::SetText {
-                node: node.clone(),
-                text: text.into(),
-            },
-            None,
-        )? {
-            WireCommandResult::TextMetrics { metrics } => Ok(metrics),
-            result => Err(unexpected_command_result("text_metrics", result.name())),
-        }
-    }
-
-    /// Replaces a text node's style and returns the resulting intrinsic metrics.
-    pub fn set_text_style(&mut self, node: &NodeHandle, style: TextStyle) -> Result<TextMetrics> {
-        self.require(Capability::Scene)?;
-        self.require(Capability::Text)?;
-        match self.command(
-            WireSceneCommand::SetTextStyle {
-                node: node.clone(),
-                style,
-            },
-            None,
-        )? {
-            WireCommandResult::TextMetrics { metrics } => Ok(metrics),
-            result => Err(unexpected_command_result("text_metrics", result.name())),
-        }
-    }
-
-    /// Updates selected node properties.
-    pub fn update_node(
+    /// Atomically changes selected node properties, hierarchy, visual data, or text.
+    ///
+    /// Returns fresh metrics when changing text or its style, otherwise `None`.
+    pub fn set_node(
         &mut self,
         node: &NodeHandle,
-        properties: NodePropertiesPatch,
-    ) -> Result<()> {
-        self.require(Capability::Scene)?;
-        if properties.overlap_enabled.is_some() {
-            self.require(Capability::Overlap)?;
+        changes: NodeChanges,
+    ) -> Result<Option<TextMetrics>> {
+        self.require_node_changes(&changes)?;
+        match self.command(
+            WireSceneCommand::SetNode {
+                node: node.clone(),
+                changes,
+            },
+            None,
+        )? {
+            WireCommandResult::NodeUpdated { text_metrics } => Ok(text_metrics),
+            result => Err(unexpected_command_result("node_updated", result.name())),
         }
-        if properties.external_drop_enabled.is_some() {
-            self.require(Capability::ExternalDrop)?;
-        }
-        Self::expect_acknowledged(self.command(
-            WireSceneCommand::UpdateNode {
-                node: node.clone(),
-                properties,
-            },
-            None,
-        )?)
-    }
-
-    /// Replaces a node's visual content.
-    pub fn set_content(&mut self, node: &NodeHandle, content: NodeContent) -> Result<()> {
-        self.require(Capability::Scene)?;
-        self.require_content_capabilities(&content)?;
-        Self::expect_acknowledged(self.command(
-            WireSceneCommand::SetContent {
-                node: node.clone(),
-                content,
-            },
-            None,
-        )?)
-    }
-
-    /// Changes a node parent, or makes it a root when `parent` is `None`.
-    pub fn reparent(&mut self, node: &NodeHandle, parent: Option<&NodeHandle>) -> Result<()> {
-        self.require(Capability::Scene)?;
-        Self::expect_acknowledged(self.command(
-            WireSceneCommand::Reparent {
-                node: node.clone(),
-                parent: parent.cloned(),
-            },
-            None,
-        )?)
     }
 
     /// Removes a node and all of its descendants.
@@ -1184,49 +1145,64 @@ impl Client {
         )
     }
 
-    /// Uploads an RGBA8 texture and returns its opaque handle.
-    pub fn upload_texture(
-        &mut self,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
-    ) -> Result<TextureHandle> {
-        self.require(Capability::Resources)?;
-        let expected_length = rgba8_byte_len(width, height)?;
-        if pixels.len() != expected_length {
-            return Err(Error::InvalidInput(format!(
-                "RGBA8 texture data has {} bytes, expected {expected_length}",
-                pixels.len()
-            )));
-        }
-        match self.command(
-            WireSceneCommand::UploadTexture { width, height },
-            Some(pixels),
-        )? {
-            WireCommandResult::Texture { texture } => Ok(texture),
-            result => Err(unexpected_command_result("texture", result.name())),
+    /// Uploads RGBA8 pixels or encoded GIF bytes and returns an opaque image handle.
+    pub fn upload_image(&mut self, image: ImageUpload<'_>) -> Result<ImageHandle> {
+        self.require(Capability::Images)?;
+        let (source, bytes) = match image {
+            ImageUpload::Rgba8 {
+                width,
+                height,
+                pixels,
+            } => {
+                let expected_length = rgba8_byte_len(width, height)?;
+                if pixels.len() != expected_length {
+                    return Err(Error::InvalidInput(format!(
+                        "RGBA8 image data has {} bytes, expected {expected_length}",
+                        pixels.len()
+                    )));
+                }
+                (WireImageSource::Rgba8 { width, height }, pixels)
+            }
+            ImageUpload::Gif { bytes } => (
+                WireImageSource::Gif {
+                    byte_length: bytes.len(),
+                },
+                bytes,
+            ),
+        };
+        match self.command(WireSceneCommand::UploadImage { source }, Some(bytes))? {
+            WireCommandResult::Image { image } => Ok(image),
+            result => Err(unexpected_command_result("image", result.name())),
         }
     }
 
-    /// Destroys an unreferenced session-owned texture.
-    pub fn destroy_texture(&mut self, texture: &TextureHandle) -> Result<()> {
-        self.require(Capability::Resources)?;
+    /// Removes an unreferenced session-owned image.
+    pub fn remove_image(&mut self, image: &ImageHandle) -> Result<()> {
+        self.require(Capability::Images)?;
         Self::expect_acknowledged(self.command(
-            WireSceneCommand::DestroyTexture {
-                texture: texture.clone(),
+            WireSceneCommand::RemoveImage {
+                image: image.clone(),
             },
             None,
         )?)
     }
 
-    /// Returns enabled same-session nodes currently overlapping `node`.
-    pub fn query_overlaps(&mut self, node: &NodeHandle) -> Result<OverlapQuery> {
+    /// Returns whether any enabled same-session node overlaps `node`.
+    pub fn is_overlapping(&mut self, node: &NodeHandle) -> Result<bool> {
         self.require(Capability::Scene)?;
         self.require(Capability::Overlap)?;
-        match self.command(WireSceneCommand::QueryOverlaps { node: node.clone() }, None)? {
-            WireCommandResult::Overlaps { overlapping, nodes } => {
-                Ok(OverlapQuery { overlapping, nodes })
-            }
+        match self.command(WireSceneCommand::IsOverlapping { node: node.clone() }, None)? {
+            WireCommandResult::IsOverlapping { overlapping } => Ok(overlapping),
+            result => Err(unexpected_command_result("is_overlapping", result.name())),
+        }
+    }
+
+    /// Returns enabled same-session nodes currently overlapping `node`.
+    pub fn get_overlaps(&mut self, node: &NodeHandle) -> Result<Vec<NodeHandle>> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::Overlap)?;
+        match self.command(WireSceneCommand::GetOverlaps { node: node.clone() }, None)? {
+            WireCommandResult::Overlaps { nodes } => Ok(nodes),
             result => Err(unexpected_command_result("overlaps", result.name())),
         }
     }
@@ -1303,7 +1279,7 @@ impl Client {
         let request_id = self.next_request_id();
         self.write_client_json(&WireClientMessage::Command {
             request_id: request_id.clone(),
-            command,
+            command: Box::new(command),
         })?;
         if let Some(binary_payload) = binary_payload {
             for fragment in binary_payload.chunks(BINARY_FRAGMENT_BYTES) {
@@ -1485,13 +1461,43 @@ impl Client {
         }
     }
 
-    fn require_scene_content(
-        &self,
-        properties: &NodeProperties,
-        content: &NodeContent,
-    ) -> Result<()> {
+    fn require_node_input(&self, node: &NodeInput) -> Result<()> {
         self.require(Capability::Scene)?;
-        self.require_content_capabilities(content)?;
+        match node {
+            NodeInput::Empty { properties } | NodeInput::Rectangle { properties, .. } => {
+                self.require_node_properties(properties)
+            }
+            NodeInput::Image { properties, .. } => {
+                self.require(Capability::Images)?;
+                self.require_node_properties(properties)
+            }
+            NodeInput::Text { properties, .. } => {
+                self.require(Capability::Text)?;
+                self.require_text_properties(properties)
+            }
+        }
+    }
+
+    fn require_node_changes(&self, changes: &NodeChanges) -> Result<()> {
+        self.require(Capability::Scene)?;
+        if let Some(properties) = changes.properties {
+            if properties.overlap_enabled.is_some() {
+                self.require(Capability::Overlap)?;
+            }
+            if properties.external_drop_enabled.is_some() {
+                self.require(Capability::ExternalDrop)?;
+            }
+        }
+        if matches!(changes.visual, Some(NodeVisual::Image { .. })) {
+            self.require(Capability::Images)?;
+        }
+        if changes.text.is_some() || changes.text_style.is_some() {
+            self.require(Capability::Text)?;
+        }
+        Ok(())
+    }
+
+    fn require_node_properties(&self, properties: &NodeProperties) -> Result<()> {
         if properties.overlap_enabled {
             self.require(Capability::Overlap)?;
         }
@@ -1502,20 +1508,11 @@ impl Client {
     }
 
     fn require_text_properties(&self, properties: &TextNodeProperties) -> Result<()> {
-        self.require(Capability::Scene)?;
-        self.require(Capability::Text)?;
         if properties.overlap_enabled {
             self.require(Capability::Overlap)?;
         }
         if properties.external_drop_enabled {
             self.require(Capability::ExternalDrop)?;
-        }
-        Ok(())
-    }
-
-    fn require_content_capabilities(&self, content: &NodeContent) -> Result<()> {
-        if matches!(content, NodeContent::Image { .. }) {
-            self.require(Capability::Resources)?;
         }
         Ok(())
     }
@@ -1559,7 +1556,7 @@ enum WireClientMessage {
     Close,
     Command {
         request_id: String,
-        command: WireSceneCommand,
+        command: Box<WireSceneCommand>,
     },
     Subscribe {
         subscriptions: Vec<Subscription>,
@@ -1569,61 +1566,39 @@ enum WireClientMessage {
 #[derive(Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum WireSceneCommand {
-    CreateRoot {
-        layer: SceneLayer,
-        properties: NodeProperties,
-        content: NodeContent,
-    },
-    CreateChild {
-        parent: NodeHandle,
-        properties: NodeProperties,
-        content: NodeContent,
-    },
-    UpdateNode {
-        node: NodeHandle,
-        properties: NodePropertiesPatch,
-    },
-    SetContent {
-        node: NodeHandle,
-        content: NodeContent,
-    },
-    CreateTextRoot {
-        layer: SceneLayer,
-        properties: TextNodeProperties,
-        text: String,
-        style: TextStyle,
-    },
-    CreateTextChild {
-        parent: NodeHandle,
-        properties: TextNodeProperties,
-        text: String,
-        style: TextStyle,
-    },
-    SetText {
-        node: NodeHandle,
-        text: String,
-    },
-    SetTextStyle {
-        node: NodeHandle,
-        style: TextStyle,
-    },
-    Reparent {
-        node: NodeHandle,
+    CreateNode {
+        #[serde(skip_serializing_if = "Option::is_none")]
         parent: Option<NodeHandle>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        layer: Option<SceneLayer>,
+        node: NodeInput,
+    },
+    SetNode {
+        node: NodeHandle,
+        changes: NodeChanges,
     },
     RemoveNode {
         node: NodeHandle,
     },
-    QueryOverlaps {
+    UploadImage {
+        source: WireImageSource,
+    },
+    RemoveImage {
+        image: ImageHandle,
+    },
+    IsOverlapping {
         node: NodeHandle,
     },
-    UploadTexture {
-        width: u32,
-        height: u32,
+    GetOverlaps {
+        node: NodeHandle,
     },
-    DestroyTexture {
-        texture: TextureHandle,
-    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WireImageSource {
+    Rgba8 { width: u32, height: u32 },
+    Gif { byte_length: usize },
 }
 
 #[derive(Deserialize)]
@@ -1714,20 +1689,21 @@ impl WireHostMessage {
 enum WireCommandResult {
     Node {
         node: NodeHandle,
+        #[serde(default)]
+        text_metrics: Option<TextMetrics>,
     },
-    TextNode {
-        node: NodeHandle,
-        metrics: TextMetrics,
+    NodeUpdated {
+        #[serde(default)]
+        text_metrics: Option<TextMetrics>,
     },
-    Texture {
-        texture: TextureHandle,
+    Image {
+        image: ImageHandle,
+    },
+    IsOverlapping {
+        overlapping: bool,
     },
     Overlaps {
-        overlapping: bool,
         nodes: Vec<NodeHandle>,
-    },
-    TextMetrics {
-        metrics: TextMetrics,
     },
     Acknowledged,
 }
@@ -1736,10 +1712,10 @@ impl WireCommandResult {
     fn name(&self) -> &'static str {
         match self {
             Self::Node { .. } => "node",
-            Self::TextNode { .. } => "text_node",
-            Self::Texture { .. } => "texture",
+            Self::NodeUpdated { .. } => "node_updated",
+            Self::Image { .. } => "image",
+            Self::IsOverlapping { .. } => "is_overlapping",
             Self::Overlaps { .. } => "overlaps",
-            Self::TextMetrics { .. } => "text_metrics",
             Self::Acknowledged => "acknowledged",
         }
     }
@@ -1996,7 +1972,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn serializes_a_v14_hello_with_deterministic_capabilities() {
+    fn serializes_a_v2_hello_with_deterministic_capabilities() {
         let message = WireClientMessage::Hello {
             protocol: CLP_PROTOCOL_VERSION,
             token: "secret".to_owned(),
@@ -2008,7 +1984,7 @@ mod tests {
             serde_json::to_value(message).unwrap(),
             json!({
                 "type": "hello",
-                "protocol": { "major": 1, "minor": 4 },
+                "protocol": { "major": 2, "minor": 0 },
                 "token": "secret",
                 "capabilities": ["scene", "timing"]
             })
@@ -2019,16 +1995,16 @@ mod tests {
     fn serializes_an_overlap_query_with_an_opaque_handle() {
         let message = WireClientMessage::Command {
             request_id: "sdk-7".to_owned(),
-            command: WireSceneCommand::QueryOverlaps {
+            command: Box::new(WireSceneCommand::GetOverlaps {
                 node: NodeHandle("node-42".to_owned()),
-            },
+            }),
         };
         assert_eq!(
             serde_json::to_value(message).unwrap(),
             json!({
                 "type": "command",
                 "request_id": "sdk-7",
-                "command": { "op": "query_overlaps", "node": "node-42" }
+                "command": { "op": "get_overlaps", "node": "node-42" }
             })
         );
     }
@@ -2037,14 +2013,16 @@ mod tests {
     fn serializes_an_external_drop_opt_in_node() {
         let message = WireClientMessage::Command {
             request_id: "sdk-8".to_owned(),
-            command: WireSceneCommand::CreateRoot {
-                layer: SceneLayer::Overlay,
-                properties: NodeProperties {
-                    external_drop_enabled: true,
-                    ..NodeProperties::new(1.0, 2.0, 30.0, 40.0)
+            command: Box::new(WireSceneCommand::CreateNode {
+                parent: None,
+                layer: Some(SceneLayer::Overlay),
+                node: NodeInput::Empty {
+                    properties: NodeProperties {
+                        external_drop_enabled: true,
+                        ..NodeProperties::new(1.0, 2.0, 30.0, 40.0)
+                    },
                 },
-                content: NodeContent::Empty,
-            },
+            }),
         };
         assert_eq!(
             serde_json::to_value(message).unwrap(),
@@ -2052,20 +2030,22 @@ mod tests {
                 "type": "command",
                 "request_id": "sdk-8",
                 "command": {
-                    "op": "create_root",
+                    "op": "create_node",
                     "layer": "overlay",
-                    "properties": {
-                        "x": 1.0,
-                        "y": 2.0,
-                        "width": 30.0,
-                        "height": 40.0,
-                        "visible": true,
-                        "clip_children": false,
-                        "z_index": 0,
-                        "overlap_enabled": false,
-                        "external_drop_enabled": true
-                    },
-                    "content": { "kind": "empty" }
+                    "node": {
+                        "kind": "empty",
+                        "properties": {
+                            "x": 1.0,
+                            "y": 2.0,
+                            "width": 30.0,
+                            "height": 40.0,
+                            "visible": true,
+                            "clip_children": false,
+                            "z_index": 0,
+                            "overlap_enabled": false,
+                            "external_drop_enabled": true
+                        }
+                    }
                 }
             })
         );
@@ -2075,20 +2055,23 @@ mod tests {
     fn serializes_intrinsic_text_commands() {
         let message = WireClientMessage::Command {
             request_id: "sdk-9".to_owned(),
-            command: WireSceneCommand::CreateTextRoot {
-                layer: SceneLayer::Overlay,
-                properties: TextNodeProperties {
-                    overlap_enabled: true,
-                    ..TextNodeProperties::new(24.0, 48.0)
+            command: Box::new(WireSceneCommand::CreateNode {
+                parent: None,
+                layer: Some(SceneLayer::Overlay),
+                node: NodeInput::Text {
+                    properties: TextNodeProperties {
+                        overlap_enabled: true,
+                        ..TextNodeProperties::new(24.0, 48.0)
+                    },
+                    text: "a\tb\n界".to_owned(),
+                    style: TextStyle {
+                        color: Some([30, 200, 255, 255]),
+                        weight: TextWeight::Bold,
+                        align: TextAlign::Center,
+                        ..TextStyle::default()
+                    },
                 },
-                text: "a\tb\n界".to_owned(),
-                style: TextStyle {
-                    color: Some([30, 200, 255, 255]),
-                    weight: TextWeight::Bold,
-                    align: TextAlign::Center,
-                    ..TextStyle::default()
-                },
-            },
+            }),
         };
         assert_eq!(
             serde_json::to_value(message).unwrap(),
@@ -2096,24 +2079,91 @@ mod tests {
                 "type": "command",
                 "request_id": "sdk-9",
                 "command": {
-                    "op": "create_text_root",
+                    "op": "create_node",
                     "layer": "overlay",
-                    "properties": {
-                        "x": 24.0,
-                        "y": 48.0,
-                        "visible": true,
-                        "clip_children": false,
-                        "z_index": 0,
-                        "overlap_enabled": true,
-                        "external_drop_enabled": false
-                    },
-                    "text": "a\tb\n界",
-                    "style": {
-                        "color": [30, 200, 255, 255],
-                        "weight": "bold",
-                        "align": "center"
+                    "node": {
+                        "kind": "text",
+                        "properties": {
+                            "x": 24.0,
+                            "y": 48.0,
+                            "visible": true,
+                            "clip_children": false,
+                            "z_index": 0,
+                            "overlap_enabled": true,
+                            "external_drop_enabled": false
+                        },
+                        "text": "a\tb\n界",
+                        "style": {
+                            "color": [30, 200, 255, 255],
+                            "weight": "bold",
+                            "align": "center"
+                        }
                     }
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_an_atomic_visual_and_parent_update() {
+        let message = WireClientMessage::Command {
+            request_id: "sdk-10".to_owned(),
+            command: Box::new(WireSceneCommand::SetNode {
+                node: NodeHandle("node-4".to_owned()),
+                changes: NodeChanges {
+                    parent: Some(NodeParent::Root),
+                    visual: Some(NodeVisual::Image {
+                        image: ImageHandle("image-7".to_owned()),
+                        opacity: 0.75,
+                    }),
+                    ..NodeChanges::default()
+                },
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "command",
+                "request_id": "sdk-10",
+                "command": {
+                    "op": "set_node",
+                    "node": "node-4",
+                    "changes": {
+                        "parent": { "kind": "root" },
+                        "visual": {
+                            "kind": "image",
+                            "image": "image-7",
+                            "opacity": 0.75
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_rgba8_and_gif_image_sources() {
+        let rgba8 = WireSceneCommand::UploadImage {
+            source: WireImageSource::Rgba8 {
+                width: 2,
+                height: 3,
+            },
+        };
+        let gif = WireSceneCommand::UploadImage {
+            source: WireImageSource::Gif { byte_length: 128 },
+        };
+        assert_eq!(
+            serde_json::to_value(rgba8).unwrap(),
+            json!({
+                "op": "upload_image",
+                "source": { "kind": "rgba8", "width": 2, "height": 3 }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(gif).unwrap(),
+            json!({
+                "op": "upload_image",
+                "source": { "kind": "gif", "byte_length": 128 }
             })
         );
     }
@@ -2124,9 +2174,9 @@ mod tests {
             "type": "result",
             "request_id": "sdk-9",
             "result": {
-                "kind": "text_node",
+                "kind": "node",
                 "node": "node-4",
-                "metrics": {
+                "text_metrics": {
                     "columns": 9,
                     "rows": 2,
                     "width": 86.4,
@@ -2136,7 +2186,11 @@ mod tests {
         }))
         .unwrap();
         let WireHostMessage::Result {
-            result: WireCommandResult::TextNode { node, metrics },
+            result:
+                WireCommandResult::Node {
+                    node,
+                    text_metrics: Some(metrics),
+                },
             ..
         } = message
         else {

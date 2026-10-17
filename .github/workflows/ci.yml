@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: Full Chymeral core commit SHA for cross-repository conformance.
+        required: true
+        type: string
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Rust ${{ matrix.toolchain }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        toolchain: [1.85, stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo test --all-targets -- --test-threads=1
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --release --examples
+
+  conformance:
+    name: Cross-repository CLP conformance
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: chymeral-rust-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: Chymeral/chymeral
+          ref: ${{ inputs.core_ref }}
+          path: chymeral
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run the SDK against the pinned core fixture
+        run: >-
+          cargo run --manifest-path chymeral/Cargo.toml --release --example clp_fixture_server --
+          cargo run --manifest-path chymeral-rust-sdk/Cargo.toml --release --example clp_conformance
