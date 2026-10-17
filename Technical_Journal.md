@@ -17,6 +17,9 @@ rectangle-overlap surface. It also includes two executable clients:
 - `clp_conformance`, a deterministic protocol and capability check.
 - `clp_probe`, a visual drag-and-overlap exercise for a live Chymeral window.
 
+The visual probe was retired after M19 validation, along with the later text
+probe, so the distributable SDK repository retains only `clp_conformance`.
+
 ## Architectural decisions
 
 ### Separate client library
@@ -64,13 +67,13 @@ service, or close the terminal when `Client::close` ends its own session.
 
 The SDK is checked in a Linux/Windows GitHub Actions matrix for Rust 1.85 and
 stable. Each job runs formatting, all-target tests, warnings-denied Clippy, and
-release builds of both examples.
+the release build of the conformance example.
 
 The conformance program establishes a session, requests and subscribes to
 capabilities, confirms timing delivery, uploads and destroys RGBA8 data, mutates
 the retained scene, queries an overlap, and validates `ClientRequested` closure.
-The visual probe verifies practical input routing, drag updates, overlap-enter
-and overlap-leave transitions, and a session-only close.
+The retired visual probe verified practical input routing, drag updates,
+overlap-enter and overlap-leave transitions, and a session-only close.
 
 Manual validation on Linux and Windows confirmed that a completed or failed CLP
 session returns to the same shell, while the surrounding Chymeral terminal

@@ -27,8 +27,7 @@ this repository.
 - Incoming external-file-drop events for opt-in scene nodes.
 - Opaque `NodeHandle` and `ImageHandle` values that cannot be confused with
   host implementation identifiers.
-- `clp_conformance`, `clp_probe`, and `clp_text_probe` examples for automated
-  and visual checks.
+- `clp_conformance`, an executable protocol-conformance check.
 
 ## Requirements
 
@@ -162,32 +161,15 @@ From a terminal inside Chymeral, run:
 
 ```text
 cargo run --example clp_conformance
-cargo run --example clp_probe
-cargo run --example clp_text_probe
 ```
 
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
 and GIF image upload/removal, visual mutation, text, overlap queries, and a
 clean close. It must return to the same terminal without closing it.
 
-`clp_probe` creates orange and blue nodes. Drag orange onto blue and observe
-the overlap transitions. The blue node opts into external drops: dropping
-a desktop file on it prints its canonical `file:` URI, while a drop outside it
-falls back to terminal insertion. Press `q` while both nodes overlap to close
-only the probe session; the Chymeral terminal stays alive.
-
-`clp_text_probe` creates a panel with text children. Confirm their local
-offsets, tabs, Unicode width, and line alignment; press `u` to change text,
-`b` to apply bold/end alignment, and `q` to close only the probe session.
-Set `CHYMERAL_TEXT_PROBE_FONT_ALIAS` to an alias declared by the host under
-`scene_text.fonts` to make the probe request that explicit file-backed font;
-when it is unset, the probe uses terminal font defaults.
-
 The repository CI validates Rust 1.85 and stable Rust on Linux and Windows. It
 runs formatting, all targets, Clippy with warnings denied, and release builds
-of all examples. Its manually dispatched cross-repository job requires an
-immutable Chymeral core commit SHA, then runs this conformance client against
-the core's non-graphical `clp_fixture_server` example.
+of the conformance example.
 
 For local checks:
 
@@ -195,7 +177,7 @@ For local checks:
 cargo fmt --check
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
-cargo build --release --examples
+cargo build --release --example clp_conformance
 ```
 
 ## Relationship to Chymeral
