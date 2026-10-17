@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "Rust client SDK for the Chymeral Link Protocol"
 repository = "https://github.com/Chymeral/chymeral-rust-sdk"
+license = "MIT"
 publish = false
 keywords = ["chymeral", "clp", "terminal", "graphics"]
 categories = ["api-bindings"]

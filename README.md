@@ -200,17 +200,20 @@ then click a scene node and press `q`. Only the CLP client closes; the terminal
 remains open.
 
 The repository CI validates Rust 1.85 and stable Rust on Linux and Windows. It
-runs formatting, all targets, Clippy with warnings denied, and release builds
-of the conformance example.
+runs formatting, all targets, Clippy and Rustdoc with warnings denied, and
+release builds of the conformance example.
 
 For local checks:
 
 ```text
 cargo fmt --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo build --release --example clp_conformance
+cargo test --locked --all-targets -- --test-threads=1
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked --release --example clp_conformance
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the warnings-denied Rustdoc command
+and its Linux/Windows shell forms.
 
 ## Relationship to Chymeral
 
@@ -222,6 +225,18 @@ negotiated lifecycle, capability, ownership, and delivery contracts.
 See the [Technical Journal](Technical_Journal.md) for the M14–M20 record and
 design decisions. The host repository's `Main_Manual.md` is the authoritative
 guide to Chymeral configuration and the complete runtime behavior.
+
+## Version and contribution policy
+
+This crate's `1.0.x` line is the stable Rust binding for CLP v2.0. Chymeral
+application versions, CLP protocol versions, and SDK versions are independent:
+compatibility follows the negotiated CLP contract rather than matching version
+strings. The core Chymeral application is not a supported Rust library; this
+crate is the supported Rust client surface.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the public API,
+[CHANGELOG.md](CHANGELOG.md) for release history, and
+[SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 ## License
 

@@ -1,0 +1,55 @@
+# Contributing to the Chymeral Rust SDK
+
+This repository is the standalone reference Rust client for the public
+Chymeral Link Protocol (CLP). It must remain independent from Chymeral host
+implementation code: it connects over the local protocol and never loads into
+the terminal process.
+
+## Development setup
+
+The repository pins Rust `1.85.0` through `rust-toolchain.toml`. Install it
+with Rustup if necessary:
+
+```text
+rustup toolchain install 1.85.0 --component rustfmt --component clippy
+```
+
+Run all required checks from the repository root:
+
+```text
+cargo fmt --check
+cargo test --locked --all-targets -- --test-threads=1
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked --release --examples
+```
+
+Also build the documentation with warnings denied. In a Unix shell, run
+`RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps`; in PowerShell, run
+`$env:RUSTDOCFLAGS = "-D warnings"; cargo doc --locked --no-deps`.
+
+The conformance executable needs a Chymeral terminal session for live
+validation. Launch Chymeral, open its terminal, then run:
+
+```text
+cargo run --example clp_conformance
+```
+
+Use `-- --manual` for the visual scene check. Do not commit `target/`, personal
+configuration, generated binaries, or screenshots unless an issue explicitly
+requires a small reproducible fixture.
+
+## Public API and protocol rules
+
+The SDK is a typed binding for CLP v2.0. Preserve its synchronous, no-async
+runtime design unless a proposed major-version change says otherwise. Changes
+to public types, methods, serialization, error codes, or lifecycle behavior
+need documentation, focused tests, and a corresponding conformance update.
+
+CLP is language-neutral. Do not add Rust-only protocol behavior, host internals
+as a dependency, silent compatibility aliases, or APIs that cannot be modeled
+by another conforming client. Coordinate any wire-contract change with the
+Chymeral core repository before implementation.
+
+Keep pull requests narrow and explain their API compatibility and Linux/Windows
+validation. Security reports belong in [SECURITY.md](SECURITY.md), not in a
+public issue.

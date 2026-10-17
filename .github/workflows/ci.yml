@@ -1,8 +1,12 @@
-name: CI
+name: Quality
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   quality:
@@ -20,6 +24,9 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo test --all-targets -- --test-threads=1
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo build --release --examples
+      - run: cargo test --locked --all-targets -- --test-threads=1
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo build --locked --release --examples
