@@ -7,10 +7,11 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The implementation supports **CLP v2.0**. Its v2 vocabulary intentionally
-does not preserve CLP v1.x command aliases. The SDK is synchronous by design.
-It has no async-runtime dependency. Its package is not published to crates.io
-yet (`publish = false`); use a local path dependency while developing against
+The implementation supports the public **CLP v2.0** contract. Its v2
+vocabulary intentionally does not preserve CLP v1.x command aliases. The SDK
+is synchronous by design and has no async-runtime dependency. Version `1.0.0`
+is the first stable Rust binding; it remains source-local for now
+(`publish = false`), so use a local path dependency while developing against
 this repository.
 
 ## What it provides
@@ -24,6 +25,8 @@ this repository.
 - Intrinsic scene-text nodes with terminal-cell metrics, text/style updates,
   and default terminal typography.
 - Unified session-owned RGBA8 and GIF image upload and removal.
+- Alpha-derived image contact and generic node input passthrough for layered
+  scenes without duplicate interaction logic.
 - Incoming external-file-drop events for opt-in scene nodes.
 - Opaque `NodeHandle` and `ImageHandle` values that cannot be confused with
   host implementation identifiers.
@@ -102,7 +105,7 @@ protocol version, session identifier, granted capabilities, and launch context.
 | Nodes | `create_node`, `set_node`, `remove_node` |
 | Images | `upload_image`, `remove_image`, `ImageUpload`, `ImageHandle` |
 | Text | `NodeInput::Text`, `NodeChanges::text`, `NodeChanges::text_style` |
-| Overlap | `is_overlapping`, `get_overlaps`, `NodeProperties::overlap_enabled` |
+| Interaction | `ImageContactShape`, `NodeProperties::input_passthrough`, overlap queries |
 | External drop | `Capability::ExternalDrop`, `external_drop_enabled`, `SceneEvent::ExternalDrop` |
 | Delivery | `next_notification`, `try_next_notification` |
 | Termination | `report_fault`, `close` |
@@ -132,13 +135,26 @@ reference one session-owned `ImageHandle`, uploaded as RGBA8 pixels or encoded
 GIF bytes through `upload_image`. The host validates dimensions, exact RGBA8
 byte length, ownership, resource limits, and capability grants.
 
-Rectangular overlap is opt-in. Request both `Capability::Scene` and
+Overlap is opt-in. Request both `Capability::Scene` and
 `Capability::Overlap`, then set `overlap_enabled: true` in node properties or a
 property patch. `is_overlapping` returns direct contact state and
 `get_overlaps` returns current same-session contacts, while
 `SceneEvent::OverlapEnter` and `SceneEvent::OverlapLeave` describe transitions.
-This is geometry, not a physics engine: visibility, clipping, paint order, and
-image alpha do not affect the rectangle test.
+
+Images use `ImageContactShape::Bounds` by default, preserving ordinary
+rectangular contact. Set `ImageContactShape::alpha()` or
+`ImageContactShape::Alpha { threshold }` to use source alpha instead: alpha
+zero passes through and thresholds range from `1` to `255`. Static RGBA8 images
+use their uploaded alpha; GIF images use their current decoded frame. The same
+shape is used for pointer routing, drag/drop targets, incoming desktop-file
+drops, direct overlap queries, and overlap transitions. Visibility, clipping,
+and paint order still do not alter overlap participation.
+
+Every node family also has `input_passthrough`. When true, that node is skipped
+for pointer-derived and external-drop target selection, while its children stay
+independently interactive. It does not hide the node, alter its stacking, or
+disable its overlap participation. This is useful for a decorative image or
+text layer painted above an interactive node.
 
 ## Intrinsic scene text
 
@@ -164,8 +180,24 @@ cargo run --example clp_conformance
 ```
 
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
-and GIF image upload/removal, visual mutation, text, overlap queries, and a
-clean close. It must return to the same terminal without closing it.
+and GIF image upload/removal, alpha-contact visual mutation, text, overlap
+queries, and a clean close. It must return to the same terminal without closing
+it.
+
+For an interactive M20 check in a graphical Chymeral session, run:
+
+```text
+cargo run --example clp_conformance -- --manual
+```
+
+The same executable keeps a blue target, an orange alpha-frame image, a pink
+GIF tile that alternates between opaque and transparent, and a visible
+passthrough band on screen. Its terminal output identifies directed scene
+events and animated overlap transitions. Click the orange frame versus its
+transparent center, click the pink tile in both states, click the white band,
+optionally drop a desktop file on each region where the backend supports it,
+then click a scene node and press `q`. Only the CLP client closes; the terminal
+remains open.
 
 The repository CI validates Rust 1.85 and stable Rust on Linux and Windows. It
 runs formatting, all targets, Clippy with warnings denied, and release builds
@@ -187,9 +219,9 @@ fork and not a requirement for applications written in other languages. A
 future SDK or direct CLP client has the same status when it preserves the
 negotiated lifecycle, capability, ownership, and delivery contracts.
 
-See the [Technical Journal](Technical_Journal.md) for the M14 record and design
-decisions. The host repository's `Main_Manual.md` is the authoritative guide to
-Chymeral configuration and the complete runtime behavior.
+See the [Technical Journal](Technical_Journal.md) for the M14–M20 record and
+design decisions. The host repository's `Main_Manual.md` is the authoritative
+guide to Chymeral configuration and the complete runtime behavior.
 
 ## License
 

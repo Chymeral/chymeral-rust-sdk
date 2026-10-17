@@ -236,6 +236,11 @@ pub struct NodeProperties {
     pub overlap_enabled: bool,
     /// Allows this node to receive incoming desktop-file drops.
     pub external_drop_enabled: bool,
+    /// Skips this node during pointer and external-drop targeting.
+    ///
+    /// Its children remain independently interactive, and its display,
+    /// overlap participation, and program-owned state are unaffected.
+    pub input_passthrough: bool,
 }
 
 /// Complete properties used when creating an intrinsic text node.
@@ -258,6 +263,8 @@ pub struct TextNodeProperties {
     pub overlap_enabled: bool,
     /// Allows this node to receive incoming desktop-file drops.
     pub external_drop_enabled: bool,
+    /// Skips this node during pointer and external-drop targeting.
+    pub input_passthrough: bool,
 }
 
 impl TextNodeProperties {
@@ -271,7 +278,29 @@ impl TextNodeProperties {
             z_index: 0,
             overlap_enabled: false,
             external_drop_enabled: false,
+            input_passthrough: false,
         }
+    }
+}
+
+/// The interactive shape used by a static RGBA8 or animated GIF image node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageContactShape {
+    /// Use the complete image-node rectangle.
+    #[default]
+    Bounds,
+    /// Use the source alpha of the static image or current GIF frame.
+    Alpha {
+        /// The inclusive alpha threshold in the range `1..=255`.
+        threshold: u8,
+    },
+}
+
+impl ImageContactShape {
+    /// Creates alpha-based contact with the default threshold of one.
+    pub const fn alpha() -> Self {
+        Self::Alpha { threshold: 1 }
     }
 }
 
@@ -358,6 +387,7 @@ impl NodeProperties {
             z_index: 0,
             overlap_enabled: false,
             external_drop_enabled: false,
+            input_passthrough: false,
         }
     }
 }
@@ -392,6 +422,9 @@ pub struct NodePropertiesPatch {
     /// Optional external-file-drop target flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_drop_enabled: Option<bool>,
+    /// Optional pointer and external-drop passthrough flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_passthrough: Option<bool>,
 }
 
 /// Complete node data used by [`Client::create_node`].
@@ -418,6 +451,8 @@ pub enum NodeInput {
         image: ImageHandle,
         /// Image opacity in the inclusive range accepted by Chymeral.
         opacity: f32,
+        /// Interactive image shape. `Bounds` preserves rectangular contact.
+        contact_shape: ImageContactShape,
     },
     /// Text with host-computed terminal-cell bounds.
     Text {
@@ -447,6 +482,8 @@ pub enum NodeVisual {
         image: ImageHandle,
         /// Image opacity in the inclusive range accepted by Chymeral.
         opacity: f32,
+        /// Interactive image shape. `Bounds` preserves rectangular contact.
+        contact_shape: ImageContactShape,
     },
 }
 
@@ -1467,8 +1504,13 @@ impl Client {
             NodeInput::Empty { properties } | NodeInput::Rectangle { properties, .. } => {
                 self.require_node_properties(properties)
             }
-            NodeInput::Image { properties, .. } => {
+            NodeInput::Image {
+                properties,
+                contact_shape,
+                ..
+            } => {
                 self.require(Capability::Images)?;
+                self.validate_image_contact_shape(*contact_shape)?;
                 self.require_node_properties(properties)
             }
             NodeInput::Text { properties, .. } => {
@@ -1488,8 +1530,9 @@ impl Client {
                 self.require(Capability::ExternalDrop)?;
             }
         }
-        if matches!(changes.visual, Some(NodeVisual::Image { .. })) {
+        if let Some(NodeVisual::Image { contact_shape, .. }) = &changes.visual {
             self.require(Capability::Images)?;
+            self.validate_image_contact_shape(*contact_shape)?;
         }
         if changes.text.is_some() || changes.text_style.is_some() {
             self.require(Capability::Text)?;
@@ -1513,6 +1556,15 @@ impl Client {
         }
         if properties.external_drop_enabled {
             self.require(Capability::ExternalDrop)?;
+        }
+        Ok(())
+    }
+
+    fn validate_image_contact_shape(&self, contact_shape: ImageContactShape) -> Result<()> {
+        if matches!(contact_shape, ImageContactShape::Alpha { threshold: 0 }) {
+            return Err(Error::InvalidInput(
+                "image alpha contact threshold must be between 1 and 255".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -2043,7 +2095,8 @@ mod tests {
                             "clip_children": false,
                             "z_index": 0,
                             "overlap_enabled": false,
-                            "external_drop_enabled": true
+                            "external_drop_enabled": true,
+                            "input_passthrough": false
                         }
                     }
                 }
@@ -2090,7 +2143,8 @@ mod tests {
                             "clip_children": false,
                             "z_index": 0,
                             "overlap_enabled": true,
-                            "external_drop_enabled": false
+                            "external_drop_enabled": false,
+                            "input_passthrough": false
                         },
                         "text": "a\tb\n界",
                         "style": {
@@ -2115,6 +2169,7 @@ mod tests {
                     visual: Some(NodeVisual::Image {
                         image: ImageHandle("image-7".to_owned()),
                         opacity: 0.75,
+                        contact_shape: ImageContactShape::Bounds,
                     }),
                     ..NodeChanges::default()
                 },
@@ -2133,11 +2188,70 @@ mod tests {
                         "visual": {
                             "kind": "image",
                             "image": "image-7",
-                            "opacity": 0.75
+                            "opacity": 0.75,
+                            "contact_shape": { "kind": "bounds" }
                         }
                     }
                 }
             })
+        );
+    }
+
+    #[test]
+    fn serializes_alpha_contact_and_input_passthrough() {
+        let message = WireClientMessage::Command {
+            request_id: "sdk-11".to_owned(),
+            command: Box::new(WireSceneCommand::CreateNode {
+                parent: None,
+                layer: Some(SceneLayer::Overlay),
+                node: NodeInput::Image {
+                    properties: NodeProperties {
+                        input_passthrough: true,
+                        ..NodeProperties::new(4.0, 8.0, 32.0, 16.0)
+                    },
+                    image: ImageHandle("image-7".to_owned()),
+                    opacity: 1.0,
+                    contact_shape: ImageContactShape::Alpha { threshold: 128 },
+                },
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "command",
+                "request_id": "sdk-11",
+                "command": {
+                    "op": "create_node",
+                    "layer": "overlay",
+                    "node": {
+                        "kind": "image",
+                        "properties": {
+                            "x": 4.0,
+                            "y": 8.0,
+                            "width": 32.0,
+                            "height": 16.0,
+                            "visible": true,
+                            "clip_children": false,
+                            "z_index": 0,
+                            "overlap_enabled": false,
+                            "external_drop_enabled": false,
+                            "input_passthrough": true
+                        },
+                        "image": "image-7",
+                        "opacity": 1.0,
+                        "contact_shape": { "kind": "alpha", "threshold": 128 }
+                    }
+                }
+            })
+        );
+
+        let patch = NodePropertiesPatch {
+            input_passthrough: Some(false),
+            ..NodePropertiesPatch::default()
+        };
+        assert_eq!(
+            serde_json::to_value(patch).unwrap(),
+            json!({ "input_passthrough": false })
         );
     }
 

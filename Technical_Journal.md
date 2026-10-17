@@ -10,9 +10,11 @@ M14 made CLP practical for an external application without making Rust part of
 the host. The result is a separate repository and crate named
 `chymeral-rust-sdk`, imported in Rust as `chymeral_rust_sdk`.
 
-The crate implements the negotiated CLP v1.3 lifecycle, typed scene/resource
-commands, subscriptions, notifications, close semantics, and the full
-rectangle-overlap surface. It also includes two executable clients:
+The initial crate implemented the negotiated CLP v1.3 lifecycle, typed
+scene/resource commands, subscriptions, notifications, close semantics, and
+the rectangle-overlap surface. M19 then replaced that provisional wire contract
+with CLP v2.0 and its canonical node/image operations. It also includes two
+historical executable clients:
 
 - `clp_conformance`, a deterministic protocol and capability check.
 - `clp_probe`, a visual drag-and-overlap exercise for a live Chymeral window.
@@ -63,6 +65,33 @@ The SDK connects only through `CHYMERAL_CLP_ENDPOINT` and
 It does not alter standard streams, create a window, run a global background
 service, or close the terminal when `Client::close` ends its own session.
 
+## M19–M20 stabilization
+
+M19 aligned the SDK with the breaking CLP v2.0 contract: one implicit scene per
+session, canonical `create_node`, `set_node`, `remove_node`, `upload_image`,
+`remove_image`, `is_overlapping`, and `get_overlaps` operations, plus unified
+RGBA8/GIF `ImageHandle` ownership. This deliberately removed v1.x aliases
+before the first public binding release.
+
+M20 implements interaction fidelity without raising the protocol version. The
+public `ImageContactShape` lets an image retain normal rectangular contact or
+use uploaded RGBA8 alpha/current GIF-frame alpha with a threshold from `1` to
+`255`. The default is `Bounds`; `ImageContactShape::alpha()` selects the
+default alpha threshold of one. The host applies the same shape to pointer,
+drag/drop, external-file-drop, direct-overlap, and overlap-transition routing.
+
+`input_passthrough` is a separate generic node property. It skips only the
+node itself during pointer-derived and external-drop targeting; it does not
+hide the node, suppress children, or alter overlap state. This enables visual
+layers above a control without recreating the control's interaction logic.
+
+The crate manifest moves to `1.0.0` as the first stable Rust SDK surface. It
+remains `publish = false` until ecosystem packaging is separately decided;
+stable describes the source API and its CLP v2.0 contract, not a crates.io
+publication. Graphical Linux and Windows acceptance passed for the M20 alpha,
+passthrough, and animated-image scenario; the host's `NEXT_STEPS.md` records
+that evidence before the release tag is made.
+
 ## Validation delivery
 
 The SDK is checked in a Linux/Windows GitHub Actions matrix for Rust 1.85 and
@@ -70,8 +99,9 @@ stable. Each job runs formatting, all-target tests, warnings-denied Clippy, and
 the release build of the conformance example.
 
 The conformance program establishes a session, requests and subscribes to
-capabilities, confirms timing delivery, uploads and destroys RGBA8 data, mutates
-the retained scene, queries an overlap, and validates `ClientRequested` closure.
+capabilities, confirms timing delivery, uploads and destroys RGBA8/GIF data,
+mutates the retained scene with alpha-contact visuals, queries an overlap, and
+validates `ClientRequested` closure.
 The retired visual probe verified practical input routing, drag updates,
 overlap-enter and overlap-leave transitions, and a session-only close.
 
@@ -84,8 +114,8 @@ the host before this SDK was accepted as the M14 reference client.
 
 - The crate is source-local for now and is not published to crates.io.
 - No async adapter, code generator, or language-neutral IDL is supplied yet.
-- It does not add widgets, physics, 3D, gamepad handling, external drag-and-drop,
-  or non-rectangular collision to the host protocol.
+- It does not add widgets, physics, 3D, gamepad handling, outgoing external
+  drag-and-drop, or arbitrary vector/polygon collision to the host protocol.
 - It is not an alternative terminal, renderer, or application framework.
 
 Those boundaries make the SDK small enough to be a reliable reference while
