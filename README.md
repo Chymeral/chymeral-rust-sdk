@@ -1,4 +1,15 @@
+<p align="center">
+  <a href="https://github.com/Chymeral/chymeral"><img src="https://raw.githubusercontent.com/Chymeral/chymeral/main/branding/chymeral_logo.svg" alt="Chymeral logo" width="160"></a>
+</p>
+
 # Chymeral Rust SDK
+
+<p align="center">
+  <a href="https://github.com/Chymeral/chymeral-rust-sdk/actions/workflows/ci.yml"><img src="https://github.com/Chymeral/chymeral-rust-sdk/actions/workflows/ci.yml/badge.svg" alt="SDK quality checks"></a>
+  <a href="https://crates.io/crates/chymeral-rust-sdk"><img src="https://img.shields.io/crates/v/chymeral-rust-sdk.svg" alt="crates.io version"></a>
+  <a href="https://docs.rs/chymeral-rust-sdk"><img src="https://docs.rs/chymeral-rust-sdk/badge.svg" alt="docs.rs documentation"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Chymeral/chymeral-rust-sdk" alt="MIT License"></a>
+</p>
 
 > The reference Rust client library for the Chymeral Link Protocol (CLP).
 
@@ -10,9 +21,12 @@ privileged language in the Chymeral ecosystem.
 The implementation supports the public **CLP v2.0** contract. Its v2
 vocabulary intentionally does not preserve CLP v1.x command aliases. The SDK
 is synchronous by design and has no async-runtime dependency. Version `1.0.0`
-is the first stable Rust binding. Released versions are consumed through
-`crates.io`; use a local path dependency only while developing unreleased
-changes against this repository.
+is the first stable Rust binding, available from
+[crates.io](https://crates.io/crates/chymeral-rust-sdk) with generated API
+documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk). The matching
+[GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
+records its human-readable release notes. Use a local path dependency only
+while developing unreleased changes against this repository.
 
 ## What it provides
 
@@ -47,7 +61,13 @@ session exists there.
 
 ## Add it to an application
 
-For a released version, declare the crate from `crates.io`:
+For a released version, add the crate from `crates.io`:
+
+```text
+cargo add chymeral-rust-sdk
+```
+
+Or declare it explicitly:
 
 ```toml
 [dependencies]
