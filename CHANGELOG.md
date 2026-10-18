@@ -24,5 +24,5 @@ No unreleased public API changes.
 
 - `1.0.x` supports CLP v2.0 only. It intentionally does not retain CLP v1.x or
   provisional v1.4 command aliases.
-- The crate remains source-local (`publish = false`) until an explicit package
-  distribution decision is made.
+- Released SDK versions are distributed as source crates through `crates.io`;
+  the repository remains the authoritative development source.

@@ -10,9 +10,9 @@ privileged language in the Chymeral ecosystem.
 The implementation supports the public **CLP v2.0** contract. Its v2
 vocabulary intentionally does not preserve CLP v1.x command aliases. The SDK
 is synchronous by design and has no async-runtime dependency. Version `1.0.0`
-is the first stable Rust binding; it remains source-local for now
-(`publish = false`), so use a local path dependency while developing against
-this repository.
+is the first stable Rust binding. Released versions are consumed through
+`crates.io`; use a local path dependency only while developing unreleased
+changes against this repository.
 
 ## What it provides
 
@@ -47,7 +47,14 @@ session exists there.
 
 ## Add it to an application
 
-For local development, reference the checked-out SDK:
+For a released version, declare the crate from `crates.io`:
+
+```toml
+[dependencies]
+chymeral-rust-sdk = "1.0"
+```
+
+For local development, reference the checked-out SDK instead:
 
 ```toml
 [dependencies]

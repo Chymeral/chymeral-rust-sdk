@@ -38,6 +38,20 @@ Use `-- --manual` for the visual scene check. Do not commit `target/`, personal
 configuration, generated binaries, or screenshots unless an issue explicitly
 requires a small reproducible fixture.
 
+## Publishing a release
+
+Publish only from a clean `main` revision that has passed the checks above and
+is tagged with the crate version. First run:
+
+```text
+cargo package
+cargo publish --dry-run
+```
+
+Then publish the verified package with `cargo publish`. Do not use
+`--allow-dirty`; the source revision, tag, changelog, and uploaded crate must
+describe the same release.
+
 ## Public API and protocol rules
 
 The SDK is a typed binding for CLP v2.0. Preserve its synchronous, no-async
