@@ -246,8 +246,11 @@ and its Linux/Windows shell forms.
 
 CLP is language-neutral. This crate is the first reference SDK, not a protocol
 fork and not a requirement for applications written in other languages. A
-future SDK or direct CLP client has the same status when it preserves the
-negotiated lifecycle, capability, ownership, and delivery contracts.
+direct CLP client, the separate
+[Chymeral Node SDK](https://github.com/Chymeral/chymeral-node-sdk), and future
+language SDKs have the same status when they preserve the negotiated lifecycle,
+capability, ownership, and delivery contracts. The Node SDK is published on
+[npm](https://www.npmjs.com/package/@chymeral/node-sdk).
 
 See the [Technical Journal](Technical_Journal.md) for the M14–M20 record and
 design decisions. The host repository's `Main_Manual.md` is the authoritative

@@ -86,11 +86,10 @@ hide the node, suppress children, or alter overlap state. This enables visual
 layers above a control without recreating the control's interaction logic.
 
 The crate manifest moves to `1.0.0` as the first stable Rust SDK surface. It
-remains `publish = false` until ecosystem packaging is separately decided;
-stable describes the source API and its CLP v2.0 contract, not a crates.io
-publication. Graphical Linux and Windows acceptance passed for the M20 alpha,
-passthrough, and animated-image scenario; the host's `NEXT_STEPS.md` records
-that evidence before the release tag is made.
+is published on [crates.io](https://crates.io/crates/chymeral-rust-sdk) as the
+released Rust binding for CLP v2.0. Graphical Linux and Windows acceptance
+passed for the M20 alpha, passthrough, and animated-image scenario; the host's
+`NEXT_STEPS.md` records that evidence before the release tag is made.
 
 ## Validation delivery
 
@@ -112,7 +111,8 @@ the host before this SDK was accepted as the M14 reference client.
 
 ## Intentional boundaries
 
-- The crate is source-local for now and is not published to crates.io.
+- The crate is published to crates.io; this repository remains the authoritative
+  development source and conformance reference.
 - No async adapter, code generator, or language-neutral IDL is supplied yet.
 - It does not add widgets, physics, 3D, gamepad handling, outgoing external
   drag-and-drop, or arbitrary vector/polygon collision to the host protocol.
