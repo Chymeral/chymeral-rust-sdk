@@ -101,6 +101,12 @@ The conformance program establishes a session, requests and subscribes to
 capabilities, confirms timing delivery, uploads and destroys RGBA8/GIF data,
 mutates the retained scene with alpha-contact visuals, queries an overlap, and
 validates `ClientRequested` closure.
+
+M22 adds a versioned, language-neutral CLP v2.0 fixture corpus in the host
+repository. This crate vendors the exact snapshot and SHA-256 manifest, then
+replays every vector through its public synchronous API and an independent
+fake host in the Linux/Windows Rust 1.85 and stable matrix. It does not depend
+on host code or network retrieval during CI.
 The retired visual probe verified practical input routing, drag updates,
 overlap-enter and overlap-leave transitions, and a session-only close.
 

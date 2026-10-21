@@ -211,6 +211,15 @@ and GIF image upload/removal, alpha-contact visual mutation, text, overlap
 queries, and a clean close. It must return to the same terminal without closing
 it.
 
+The host repository also maintains a versioned,
+language-neutral [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0).
+This crate vendors its exact snapshot in `fixtures/clp/v2.0`, including
+`SHA256SUMS`. The `fixture_corpus` integration test verifies that checksum and
+replays every vector through the public client and an independent fake host.
+Update both files only from a reviewed core revision. The corpus complements,
+rather than replaces, this crate's focused fake-host tests and live
+conformance executable.
+
 For an interactive M20 check in a graphical Chymeral session, run:
 
 ```text
@@ -227,8 +236,8 @@ then click a scene node and press `q`. Only the CLP client closes; the terminal
 remains open.
 
 The repository CI validates Rust 1.85 and stable Rust on Linux and Windows. It
-runs formatting, all targets, Clippy and Rustdoc with warnings denied, and
-release builds of the conformance example.
+runs formatting, all targets including the vendored corpus replay, Clippy and
+Rustdoc with warnings denied, and release builds of the conformance example.
 
 For local checks:
 

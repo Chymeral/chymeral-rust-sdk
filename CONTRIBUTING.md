@@ -59,6 +59,12 @@ runtime design unless a proposed major-version change says otherwise. Changes
 to public types, methods, serialization, error codes, or lifecycle behavior
 need documentation, focused tests, and a corresponding conformance update.
 
+Use the versioned [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0)
+as the source of `fixtures/clp/v2.0/fixtures.json` and `SHA256SUMS`. Update
+those two files together from a reviewed core revision, then run
+`cargo test --locked --test fixture_corpus`. Do not add a network download or
+a dependency on the Chymeral host to this crate's ordinary CI.
+
 CLP is language-neutral. Do not add Rust-only protocol behavior, host internals
 as a dependency, silent compatibility aliases, or APIs that cannot be modeled
 by another conforming client. Coordinate any wire-contract change with the
