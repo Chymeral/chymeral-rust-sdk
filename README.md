@@ -18,16 +18,16 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The published `1.0.0` crate supports the public **CLP v2.0** contract. The
-current development source adds the **unreleased CLP v2.1** presentation API
-targeted for the SDK `2.0.0` line. It retains no CLP v1.x command aliases. The
-SDK is synchronous by design and has no async-runtime dependency. Version
-`1.0.0` is the first stable Rust binding, available from
+The published `1.5.0` crate supports the public **CLP v2.1** contract,
+including frame presentation and application window metadata. It retains a
+one-time v2.0 fallback for a v2.0-only host and no CLP v1.x command aliases.
+The SDK is synchronous by design and has no async-runtime dependency. Version
+`1.0.0` remains the first stable Rust binding, and `1.5.0` is available from
 [crates.io](https://crates.io/crates/chymeral-rust-sdk) with generated API
 documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk). The matching
 [GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
 records its human-readable release notes. Use a local path dependency only
-while developing unreleased changes against this repository.
+while developing changes against this repository.
 
 ## What it provides
 
@@ -43,8 +43,10 @@ while developing unreleased changes against this repository.
 - Alpha-derived image contact and generic node input passthrough for layered
   scenes without duplicate interaction logic.
 - Incoming external-file-drop events for opt-in scene nodes.
-- An opt-in, coalesced frame-presentation lane for bounded transient geometry
-  in the unreleased CLP v2.1 development contract.
+- An opt-in, coalesced CLP v2.1 frame-presentation lane for bounded transient
+  geometry.
+- Session-owned CLP v2.1 application window metadata with verbatim titles and
+  bounded static RGBA8 icons.
 - Opaque `NodeHandle` and `ImageHandle` values that cannot be confused with
   host implementation identifiers.
 - `clp_conformance`, an executable protocol-conformance check.
@@ -138,6 +140,7 @@ protocol version, session identifier, granted capabilities, and launch context.
 | Interaction | `ImageContactShape`, `NodeProperties::input_passthrough`, overlap queries |
 | External drop | `Capability::ExternalDrop`, `external_drop_enabled`, `SceneEvent::ExternalDrop` |
 | Frame presentation | `Capability::Presentation`, `present_scene`, `present_scene_with_id` |
+| Window metadata | `Capability::WindowMetadata`, `set_window_metadata`, `WindowMetadataPatch` |
 | Delivery | `next_notification`, `try_next_notification` |
 | Termination | `report_fault`, `close` |
 
@@ -187,7 +190,7 @@ independently interactive. It does not hide the node, alter its stacking, or
 disable its overlap participation. This is useful for a decorative image or
 text layer painted above an interactive node.
 
-## Frame-paced presentation (unreleased CLP v2.1)
+## Frame-paced presentation (CLP v2.1)
 
 `present_scene` is for the newest transient geometry, not for reliable scene
 control. Request `Capability::Scene` and `Capability::Presentation`, then send
@@ -230,9 +233,54 @@ style changes, hierarchy changes, and other ordered work on `set_node`.
 
 `Client::connect` first requests CLP v2.1. If a v2.0-only host explicitly
 rejects that lifecycle request, it reconnects once using v2.0 without
-`Capability::Presentation`. In that case `present_scene` returns
-`CapabilityNotGranted`; it never expands a packet into individual `set_node`
-commands.
+`Capability::Presentation` or `Capability::WindowMetadata`. In that case
+`present_scene` and `set_window_metadata` return `CapabilityNotGranted`; the
+SDK never expands a presentation packet into individual `set_node` commands.
+
+## Application window metadata (CLP v2.1)
+
+Request `Capability::WindowMetadata` to let this session identify its ordinary
+program in the native Chymeral window. `WindowMetadataPatch` uses explicit
+three-state fields: `MetadataField::Preserve` omits a field, `Clear` writes
+JSON `null`, and `Set` replaces it. At least one field must be non-preserved.
+
+```rust
+use chymeral_rust_sdk::{
+    Capability, ImageUpload, MetadataField, WindowMetadataPatch,
+};
+
+if client.has_capability(Capability::WindowMetadata) {
+    let icon = client.upload_image(ImageUpload::Rgba8 {
+        width: 1,
+        height: 1,
+        pixels: &[37, 99, 235, 255],
+    })?;
+
+    let status = client.set_window_metadata(WindowMetadataPatch {
+        title: MetadataField::Set("Example editor".to_owned()),
+        icon: MetadataField::Set(icon),
+    })?;
+    println!("dynamic icon support: {}", status.icon_supported);
+
+    // The icon remains selected because this patch omits it.
+    client.set_window_metadata(WindowMetadataPatch {
+        title: MetadataField::Set("Example editor — project".to_owned()),
+        ..WindowMetadataPatch::default()
+    })?;
+}
+```
+
+Titles are verbatim, nonempty, control-free Unicode with a 256-byte UTF-8
+limit. An icon is a session-owned static RGBA8 `ImageHandle`, at most 256 × 256
+pixels and 256 KiB; GIFs, paths, URLs, and foreign handles are rejected. The
+host refuses `remove_image` while that handle remains the selected icon.
+
+Each session retains a claim and the newest live nonempty claim is visible.
+Clearing the active claim or closing its session restores the newest remaining
+claim, then Chymeral's terminal-derived title and bundled icon when none
+remain. `client.session().context.window_metadata` is `Some` when negotiated
+and reports `icon_supported`; native Wayland can apply a title but reports
+`false` for portable dynamic icons. The claim stays valid in that case.
 
 ## Intrinsic scene text
 
@@ -259,8 +307,9 @@ cargo run --example clp_conformance
 
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
 and GIF image upload/removal, alpha-contact visual mutation, text, overlap
-queries, and a clean close. It must return to the same terminal without closing
-it.
+queries, a title-plus-icon metadata update, title-only preservation, explicit
+metadata clearing when a v2.1 host grants that capability, and a clean close.
+It must return to the same terminal without closing it.
 
 The host repository also maintains a versioned,
 language-neutral [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0).
@@ -271,10 +320,11 @@ Update both files only from a reviewed core revision. The corpus complements,
 rather than replaces, this crate's focused fake-host tests and live
 conformance executable.
 
-The development tree also vendors the byte-checked CLP v2.1 presentation
-fixture in `fixtures/clp/v2.1`. It verifies the public client against an
-accepted atomic packet and a rejected intrinsic-text bounds packet, while the
-v2.0 replay verifies automatic one-time fallback.
+This crate also vendors the byte-checked CLP v2.1 fixture corpus in
+`fixtures/clp/v2.1`. It verifies the public client against an accepted atomic
+packet, a rejected intrinsic-text bounds packet, and application window
+metadata patch preservation and clearing, while the v2.0 replay verifies
+automatic one-time fallback.
 
 For an interactive M20 check in a graphical Chymeral session, run:
 
@@ -323,13 +373,14 @@ guide to Chymeral configuration and the complete runtime behavior.
 
 ## Version and contribution policy
 
-This crate's `1.0.x` line is the stable Rust binding for CLP v2.0. The current
-source-tree v2.1 API is planned for the breaking `2.0.0` SDK line and is not
-published to `crates.io` yet. Chymeral application versions, CLP protocol
-versions, and SDK versions are independent: compatibility follows the
-negotiated CLP contract rather than matching version strings. The core
-Chymeral application is not a supported Rust library; this crate is the
-supported Rust client surface.
+This crate's `1.5.x` line is the stable Rust binding for CLP v2.1 and retains
+one-time CLP v2.0 fallback. The earlier `1.0.x` line supports CLP v2.0. The
+future breaking `2.0.0` line is reserved for a separately validated
+platform-capability expansion. Chymeral application versions, CLP protocol
+versions, and SDK versions are independent:
+compatibility follows the negotiated CLP contract rather than matching version
+strings. The core Chymeral application is not a supported Rust library; this
+crate is the supported Rust client surface.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the public API,
 [CHANGELOG.md](CHANGELOG.md) for release history, and

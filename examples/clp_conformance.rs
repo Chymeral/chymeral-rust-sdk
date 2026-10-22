@@ -5,8 +5,9 @@ use std::{
 
 use chymeral_rust_sdk::{
     Capabilities, Capability, Client, CloseReason, Event, ImageContactShape, ImageUpload, Key,
-    KeyState, NodeChanges, NodeInput, NodeProperties, NodePropertiesPatch, NodeVisual,
-    Notification, SceneLayer, Subscription, TextNodeProperties, TextStyle,
+    KeyState, MetadataField, NodeChanges, NodeInput, NodeProperties, NodePropertiesPatch,
+    NodeVisual, Notification, SceneLayer, Subscription, TextNodeProperties, TextStyle,
+    WindowMetadataPatch,
 };
 
 const ALPHA_TOGGLE_GIF: &[u8] = &[
@@ -45,6 +46,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         height: 1,
         pixels: &[30, 150, 240, 255],
     })?;
+    if client.has_capability(Capability::WindowMetadata) {
+        let initial = client.set_window_metadata(WindowMetadataPatch {
+            title: MetadataField::Set("Chymeral Rust SDK conformance".to_owned()),
+            icon: MetadataField::Set(image.clone()),
+        })?;
+        if let Some(support) = client.session().context.window_metadata {
+            if initial.icon_supported != support.icon_supported {
+                return Err("window metadata support disagreed with its command result".into());
+            }
+        }
+        client.set_window_metadata(WindowMetadataPatch {
+            title: MetadataField::Set("Chymeral Rust SDK conformance refreshed".to_owned()),
+            ..WindowMetadataPatch::default()
+        })?;
+        client.set_window_metadata(WindowMetadataPatch {
+            title: MetadataField::Clear,
+            icon: MetadataField::Clear,
+        })?;
+    }
     let visual = client
         .create_node(
             None,

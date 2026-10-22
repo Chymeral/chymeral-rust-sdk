@@ -1,9 +1,10 @@
 use chymeral_rust_sdk::{
-    Capabilities, Client, CloseReason, DeliveryCategory, Error, Event, ImageContactShape,
-    ImageUpload, NodeChanges, NodeHandle, NodeInput, NodeProperties, NodePropertiesPatch,
-    Notification, PresentationId, PresentationPropertiesPatch, PresentationState,
-    PresentationUpdate, ProgramPhase, SceneEvent, SceneLayer, Subscription, TextAlign,
-    TextNodeProperties, TextStyle, TextWeight,
+    Capabilities, Capability, Client, CloseReason, DeliveryCategory, Error, Event,
+    ImageContactShape, ImageUpload, MetadataField, NodeChanges, NodeHandle, NodeInput,
+    NodeProperties, NodePropertiesPatch, Notification, PresentationId, PresentationPropertiesPatch,
+    PresentationState, PresentationUpdate, ProgramPhase, SceneEvent, SceneLayer, Subscription,
+    TextAlign, TextNodeProperties, TextStyle, TextWeight, WindowMetadataPatch,
+    WindowMetadataStatus, WindowMetadataSupport,
 };
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName, prelude::*};
 use serde::Deserialize;
@@ -86,7 +87,7 @@ fn replays_the_vendored_canonical_clp_v2_fixture_corpus_through_the_public_clien
 }
 
 #[test]
-fn replays_the_vendored_clp_v2_1_presentation_fixture_through_the_public_client() {
+fn replays_the_vendored_clp_v2_1_fixture_corpus_through_the_public_client() {
     let corpus = load_fixture_corpus(FIXTURE_V2_1_BYTES, FIXTURE_V2_1_SHA256, 1);
     let (endpoint, host) = spawn_fixture_host(vector(&corpus, "frame-presentation").frames.clone());
     let mut client = Client::connect(&endpoint, FIXTURE_TOKEN, Capabilities::all())
@@ -153,6 +154,72 @@ fn replays_the_vendored_clp_v2_1_presentation_fixture_through_the_public_client(
                     == Some("node-3 has intrinsic text bounds that cannot be set directly")
     ));
 
+    assert_eq!(
+        client.close().expect("fixture close should succeed"),
+        CloseReason::ClientRequested
+    );
+    join_host(host);
+    replay_window_metadata(&corpus);
+}
+
+fn replay_window_metadata(corpus: &FixtureCorpus) {
+    let (endpoint, host) =
+        spawn_fixture_host(vector(corpus, "application-window-metadata").frames.clone());
+    let mut client = Client::connect(
+        &endpoint,
+        FIXTURE_TOKEN,
+        Capabilities::from([Capability::Images, Capability::WindowMetadata]),
+    )
+    .expect("window metadata fixture handshake should succeed");
+
+    assert!(client.has_capability(Capability::WindowMetadata));
+    assert_eq!(
+        client.session().context.window_metadata,
+        Some(WindowMetadataSupport {
+            icon_supported: true
+        })
+    );
+    let image = client
+        .upload_image(ImageUpload::Rgba8 {
+            width: 1,
+            height: 1,
+            pixels: &[255, 127, 0, 255],
+        })
+        .expect("fixture icon upload should succeed");
+    assert_eq!(image.as_str(), "image-1");
+    assert_eq!(
+        client
+            .set_window_metadata(WindowMetadataPatch {
+                title: MetadataField::Set("Fixture metadata".to_owned()),
+                icon: MetadataField::Set(image),
+            })
+            .expect("fixture metadata set should succeed"),
+        WindowMetadataStatus {
+            icon_supported: true
+        }
+    );
+    assert_eq!(
+        client
+            .set_window_metadata(WindowMetadataPatch {
+                title: MetadataField::Set("Refreshed fixture metadata".to_owned()),
+                ..WindowMetadataPatch::default()
+            })
+            .expect("fixture title replacement should preserve the icon"),
+        WindowMetadataStatus {
+            icon_supported: true
+        }
+    );
+    assert_eq!(
+        client
+            .set_window_metadata(WindowMetadataPatch {
+                title: MetadataField::Clear,
+                icon: MetadataField::Clear,
+            })
+            .expect("fixture metadata clear should succeed"),
+        WindowMetadataStatus {
+            icon_supported: true
+        }
+    );
     assert_eq!(
         client.close().expect("fixture close should succeed"),
         CloseReason::ClientRequested

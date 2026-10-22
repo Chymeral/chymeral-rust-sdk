@@ -37,6 +37,12 @@ pub const MAX_PRESENTATION_UPDATES: usize = 256;
 pub const MAX_PRESENTATION_ID_BYTES: usize = 128;
 /// Maximum serialized JSON payload size for one presentation packet.
 pub const MAX_PRESENTATION_PACKET_BYTES: usize = 64 * 1024;
+/// Maximum UTF-8 byte length of an application window title.
+pub const MAX_WINDOW_TITLE_BYTES: usize = 256;
+/// Maximum width or height of an application window icon.
+pub const MAX_WINDOW_ICON_DIMENSION: u32 = 256;
+/// Maximum RGBA8 byte length of an application window icon.
+pub const MAX_WINDOW_ICON_BYTES: usize = 256 * 1024;
 
 /// A CLP protocol version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -80,6 +86,8 @@ pub enum Capability {
     Text,
     /// Coalesced, frame-paced geometry presentation packets.
     Presentation,
+    /// Session-owned application window title and static icon metadata.
+    WindowMetadata,
 }
 
 /// A deterministic set of negotiated or requested capabilities.
@@ -103,6 +111,7 @@ impl Capabilities {
             Capability::ExternalDrop,
             Capability::Text,
             Capability::Presentation,
+            Capability::WindowMetadata,
         ])
     }
 
@@ -196,6 +205,86 @@ pub struct InitContext {
     pub arguments: Vec<String>,
     /// Initial commands requested by the launcher.
     pub initial_commands: Vec<StartupCommand>,
+    /// Backend-specific support for the negotiated window metadata capability.
+    ///
+    /// This is absent on hosts that did not grant
+    /// [`Capability::WindowMetadata`]. A native Wayland host may grant the
+    /// capability while reporting `icon_supported: false`, because it can set
+    /// the title but not a portable taskbar icon.
+    #[serde(default)]
+    pub window_metadata: Option<WindowMetadataSupport>,
+}
+
+/// Host support details for [`Capability::WindowMetadata`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WindowMetadataSupport {
+    /// Whether a static application icon can be applied on this backend.
+    pub icon_supported: bool,
+}
+
+/// One field in a [`WindowMetadataPatch`].
+///
+/// `Preserve` omits the wire field, `Clear` writes JSON `null`, and `Set`
+/// writes the supplied title or session-owned image handle.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MetadataField<T> {
+    /// Leave the field from this session's current claim unchanged.
+    #[default]
+    Preserve,
+    /// Remove this field from this session's current claim.
+    Clear,
+    /// Replace this field in this session's current claim.
+    Set(T),
+}
+
+impl<T> MetadataField<T> {
+    const fn is_preserve(&self) -> bool {
+        matches!(self, Self::Preserve)
+    }
+}
+
+impl<T> Serialize for MetadataField<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Preserve | Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+/// A partial session-owned application window metadata update.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowMetadataPatch {
+    /// Verbatim native window title. It must be nonempty, control-free, and no
+    /// longer than [`MAX_WINDOW_TITLE_BYTES`] UTF-8 bytes when set.
+    pub title: MetadataField<String>,
+    /// A session-owned static RGBA8 [`ImageHandle`] when set. GIF resources,
+    /// resources larger than the documented icon limits, and foreign handles
+    /// are rejected by the host.
+    pub icon: MetadataField<ImageHandle>,
+}
+
+impl WindowMetadataPatch {
+    /// Returns whether both fields would be omitted from the command.
+    pub const fn is_empty(&self) -> bool {
+        self.title.is_preserve() && self.icon.is_preserve()
+    }
+}
+
+/// Result returned by [`Client::set_window_metadata`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowMetadataStatus {
+    /// Whether the active host backend applied or can apply the requested icon.
+    ///
+    /// The metadata claim itself remains valid when this is false, so the
+    /// native application title still applies on native Wayland.
+    pub icon_supported: bool,
 }
 
 /// A launch command supplied in [`InitContext`].
@@ -1141,13 +1230,16 @@ impl Client {
             Err(Error::Host { code, .. })
                 if code == "unsupported_version" || code == "invalid_message" =>
             {
-                // CLP v2.0 hosts predate the presentation capability and may
-                // reject its enum value before they reach version negotiation.
-                // Reconnect exactly once with the frozen v2.0 capability set.
+                // CLP v2.0 hosts predate the v2.1 presentation and window
+                // metadata capabilities and may reject either enum value
+                // before they reach version negotiation. Reconnect exactly
+                // once with the frozen v2.0 capability set.
                 Self::connect_once(
                     endpoint,
                     token,
-                    requested_capabilities.without(Capability::Presentation),
+                    requested_capabilities
+                        .without(Capability::Presentation)
+                        .without(Capability::WindowMetadata),
                     CLP_PROTOCOL_V2_0,
                 )
             }
@@ -1451,6 +1543,28 @@ impl Client {
             },
             None,
         )?)
+    }
+
+    /// Updates this session's application window title and/or static icon.
+    ///
+    /// Omitted fields preserve this session's previous claim; [`MetadataField::Clear`]
+    /// serializes as JSON `null`. Clearing both fields removes the claim and
+    /// lets Chymeral restore the newest remaining application claim or its
+    /// terminal-derived fallback. The host rejects an icon that is not a
+    /// session-owned static RGBA8 image or exceeds its icon limits.
+    pub fn set_window_metadata(
+        &mut self,
+        metadata: WindowMetadataPatch,
+    ) -> Result<WindowMetadataStatus> {
+        self.require(Capability::WindowMetadata)?;
+        validate_window_metadata(&metadata)?;
+        let WindowMetadataPatch { title, icon } = metadata;
+        match self.command(WireSceneCommand::SetWindowMetadata { title, icon }, None)? {
+            WireCommandResult::WindowMetadata { icon_supported } => {
+                Ok(WindowMetadataStatus { icon_supported })
+            }
+            result => Err(unexpected_command_result("window_metadata", result.name())),
+        }
     }
 
     /// Returns whether any enabled same-session node overlaps `node`.
@@ -1899,6 +2013,12 @@ enum WireSceneCommand {
     GetOverlaps {
         node: NodeHandle,
     },
+    SetWindowMetadata {
+        #[serde(skip_serializing_if = "MetadataField::is_preserve")]
+        title: MetadataField<String>,
+        #[serde(skip_serializing_if = "MetadataField::is_preserve")]
+        icon: MetadataField<ImageHandle>,
+    },
 }
 
 #[derive(Serialize)]
@@ -2022,6 +2142,9 @@ enum WireCommandResult {
     Overlaps {
         nodes: Vec<NodeHandle>,
     },
+    WindowMetadata {
+        icon_supported: bool,
+    },
     Acknowledged,
 }
 
@@ -2033,6 +2156,7 @@ impl WireCommandResult {
             Self::Image { .. } => "image",
             Self::IsOverlapping { .. } => "is_overlapping",
             Self::Overlaps { .. } => "overlaps",
+            Self::WindowMetadata { .. } => "window_metadata",
             Self::Acknowledged => "acknowledged",
         }
     }
@@ -2274,6 +2398,33 @@ fn rgba8_byte_len(width: u32, height: u32) -> Result<usize> {
     usize::try_from(bytes).map_err(|_| {
         Error::InvalidInput("texture byte count does not fit this platform".to_owned())
     })
+}
+
+fn validate_window_metadata(metadata: &WindowMetadataPatch) -> Result<()> {
+    if metadata.is_empty() {
+        return Err(Error::InvalidInput(
+            "a window metadata update must set or clear at least one field".to_owned(),
+        ));
+    }
+    let MetadataField::Set(title) = &metadata.title else {
+        return Ok(());
+    };
+    if title.is_empty() {
+        return Err(Error::InvalidInput(
+            "a window title must not be empty".to_owned(),
+        ));
+    }
+    if title.len() > MAX_WINDOW_TITLE_BYTES {
+        return Err(Error::InvalidInput(format!(
+            "a window title may not exceed {MAX_WINDOW_TITLE_BYTES} UTF-8 bytes"
+        )));
+    }
+    if title.chars().any(char::is_control) {
+        return Err(Error::InvalidInput(
+            "a window title may not contain control characters".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn unexpected(expected: &str, received: &str) -> Error {
@@ -2609,6 +2760,63 @@ mod tests {
                 "source": { "kind": "gif", "byte_length": 128 }
             })
         );
+    }
+
+    #[test]
+    fn serializes_window_metadata_preservation_and_clearing() {
+        let set_title = WireSceneCommand::SetWindowMetadata {
+            title: MetadataField::Set("Chymeral SDK probe".to_owned()),
+            icon: MetadataField::Preserve,
+        };
+        let clear = WireSceneCommand::SetWindowMetadata {
+            title: MetadataField::Clear,
+            icon: MetadataField::Clear,
+        };
+        assert_eq!(
+            serde_json::to_value(set_title).unwrap(),
+            json!({
+                "op": "set_window_metadata",
+                "title": "Chymeral SDK probe"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(clear).unwrap(),
+            json!({
+                "op": "set_window_metadata",
+                "title": null,
+                "icon": null
+            })
+        );
+    }
+
+    #[test]
+    fn validates_window_metadata_input_and_decodes_its_result() {
+        assert!(matches!(
+            validate_window_metadata(&WindowMetadataPatch::default()),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            validate_window_metadata(&WindowMetadataPatch {
+                title: MetadataField::Set("line one\nline two".to_owned()),
+                ..WindowMetadataPatch::default()
+            }),
+            Err(Error::InvalidInput(_))
+        ));
+        let message: WireHostMessage = serde_json::from_value(json!({
+            "type": "result",
+            "request_id": "sdk-10",
+            "result": { "kind": "window_metadata", "icon_supported": false }
+        }))
+        .unwrap();
+        assert!(matches!(
+            message,
+            WireHostMessage::Result {
+                result: WireCommandResult::WindowMetadata {
+                    icon_supported: false
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

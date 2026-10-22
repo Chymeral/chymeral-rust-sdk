@@ -7,12 +7,15 @@ the terminal process.
 
 ## Development setup
 
-The repository pins Rust `1.85.0` through `rust-toolchain.toml`. Install it
-with Rustup if necessary:
+The repository follows the current Rust `stable` channel through
+`rust-toolchain.toml`. Install it with Rustup if necessary:
 
 ```text
-rustup toolchain install 1.85.0 --component rustfmt --component clippy
+rustup toolchain install stable --component rustfmt --component clippy --component rust-analyzer --component rust-src
 ```
+
+The minimum supported Rust version remains `1.85` and is verified separately
+in CI alongside the current stable compiler.
 
 Run all required checks from the repository root:
 
@@ -54,13 +57,15 @@ describe the same release.
 
 ## Public API and protocol rules
 
-Published `1.0.x` is a typed binding for CLP v2.0. The source tree's v2.1
-presentation work targets the breaking `2.0.0` line. Preserve the synchronous,
-no-async runtime design unless a proposed major-version change says otherwise.
+Published `1.5.x` is a typed binding for CLP v2.1 with one-time v2.0 fallback.
+The earlier `1.0.x` line implements CLP v2.0; the future breaking `2.0.0` line
+is reserved for the separately validated M26 platform expansion.
+Preserve the synchronous, no-async runtime design unless a proposed major-version change says otherwise.
 Changes to public types, methods, serialization, error codes, or lifecycle
 behavior need documentation, focused tests, and a corresponding conformance
-update. A v2.1 client must retain its one-time v2.0 fallback and must never
-expand presentation packets into ordered node commands.
+update. A v2.1 client must retain its one-time v2.0 fallback, must never expand
+presentation packets into ordered node commands, and must remove both
+v2.1-only capabilities from its v2.0 retry.
 
 Use the versioned [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0)
 as the source of `fixtures/clp/v2.0/fixtures.json` and `SHA256SUMS`. Update
@@ -69,7 +74,7 @@ those two files together from a reviewed core revision, then run
 a dependency on the Chymeral host to this crate's ordinary CI.
 
 For a CLP v2.1 change, also update the reviewed
-[v2.1 presentation corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.1)
+[v2.1 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.1)
 and its vendored `fixtures/clp/v2.1` snapshot together. Check both hashes and
 keep the v2.0 replay to prove compatibility.
 

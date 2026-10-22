@@ -110,6 +110,24 @@ on host code or network retrieval during CI.
 The retired visual probe verified practical input routing, drag updates,
 overlap-enter and overlap-leave transitions, and a session-only close.
 
+M23–M24 add the opt-in CLP v2.1 presentation and application-window-metadata
+capabilities without weakening the synchronous control plane.
+The crate models metadata's omitted/cleared/set wire distinction explicitly as
+`MetadataField`, so a title-only update preserves a selected icon. Its one-time
+v2.0 reconnect removes both v2.1-only capabilities. The v2.1 fixture replay
+covers the resulting title/icon patch sequence independently from live host
+tests.
+
+M25 consolidates that API as the `1.5.0` stable Rust binding for CLP v2.1. It
+retains the deliberate one-time v2.0 lifecycle retry without silently
+translating presentation traffic into ordered node mutations. Locked formatting,
+tests, warnings-denied Clippy and Rustdoc, package validation, and release
+example builds passed on Linux and Windows. The vendored v2.1 fixture snapshot
+and SHA-256 manifest match the core and Node SDK snapshots byte for byte. Live
+Rust conformance and the Node visual probes passed against the matching
+Chymeral `1.5.0` host on Windows, Linux/X11, and native Wayland, with native
+Wayland correctly reporting dynamic application icons unsupported.
+
 Manual validation on Linux and Windows confirmed that a completed or failed CLP
 session returns to the same shell, while the surrounding Chymeral terminal
 remains active. Windows named-pipe backpressure was specifically hardened in
