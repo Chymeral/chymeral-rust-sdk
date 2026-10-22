@@ -306,7 +306,8 @@ fn manual_interaction_demo(client: &mut Client) -> Result<(), Box<dyn Error>> {
             | Notification::Tick(_)
             | Notification::Frame(_)
             | Notification::Resize(_)
-            | Notification::DeliveryGap(_) => {}
+            | Notification::DeliveryGap(_)
+            | Notification::PresentationStatus(_) => {}
         }
     }
 

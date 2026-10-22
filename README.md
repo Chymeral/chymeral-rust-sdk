@@ -18,10 +18,11 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The implementation supports the public **CLP v2.0** contract. Its v2
-vocabulary intentionally does not preserve CLP v1.x command aliases. The SDK
-is synchronous by design and has no async-runtime dependency. Version `1.0.0`
-is the first stable Rust binding, available from
+The published `1.0.0` crate supports the public **CLP v2.0** contract. The
+current development source adds the **unreleased CLP v2.1** presentation API
+targeted for the SDK `2.0.0` line. It retains no CLP v1.x command aliases. The
+SDK is synchronous by design and has no async-runtime dependency. Version
+`1.0.0` is the first stable Rust binding, available from
 [crates.io](https://crates.io/crates/chymeral-rust-sdk) with generated API
 documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk). The matching
 [GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
@@ -42,6 +43,8 @@ while developing unreleased changes against this repository.
 - Alpha-derived image contact and generic node input passthrough for layered
   scenes without duplicate interaction logic.
 - Incoming external-file-drop events for opt-in scene nodes.
+- An opt-in, coalesced frame-presentation lane for bounded transient geometry
+  in the unreleased CLP v2.1 development contract.
 - Opaque `NodeHandle` and `ImageHandle` values that cannot be confused with
   host implementation identifiers.
 - `clp_conformance`, an executable protocol-conformance check.
@@ -134,6 +137,7 @@ protocol version, session identifier, granted capabilities, and launch context.
 | Text | `NodeInput::Text`, `NodeChanges::text`, `NodeChanges::text_style` |
 | Interaction | `ImageContactShape`, `NodeProperties::input_passthrough`, overlap queries |
 | External drop | `Capability::ExternalDrop`, `external_drop_enabled`, `SceneEvent::ExternalDrop` |
+| Frame presentation | `Capability::Presentation`, `present_scene`, `present_scene_with_id` |
 | Delivery | `next_notification`, `try_next_notification` |
 | Termination | `report_fault`, `close` |
 
@@ -143,7 +147,7 @@ The central value types are `Capabilities`, `NodeProperties`,
 for field-level contracts.
 
 `Notification` delivers events, `Tick`, `Frame`, `Resize`, `DeliveryGap`,
-`Closing`, and `Closed`. A client must treat `DeliveryGap` as a request to
+`PresentationStatus`, `Closing`, and `Closed`. A client must treat `DeliveryGap` as a request to
 rebuild state derived from continuous data. Discrete input and resize are not
 silently discarded by Chymeral; a session that cannot preserve them is isolated
 with an explicit close reason instead.
@@ -183,6 +187,53 @@ independently interactive. It does not hide the node, alter its stacking, or
 disable its overlap participation. This is useful for a decorative image or
 text layer painted above an interactive node.
 
+## Frame-paced presentation (unreleased CLP v2.1)
+
+`present_scene` is for the newest transient geometry, not for reliable scene
+control. Request `Capability::Scene` and `Capability::Presentation`, then send
+one atomic packet with `Client::present_scene` or an application-defined
+`PresentationId` through `Client::present_scene_with_id`:
+
+```rust
+use chymeral_rust_sdk::{PresentationPropertiesPatch, PresentationUpdate};
+
+let presentation_id = client.present_scene([
+    PresentationUpdate {
+        node: viewport_root.clone(),
+        properties: PresentationPropertiesPatch {
+            x: Some(128.0),
+            y: Some(72.0),
+            ..PresentationPropertiesPatch::default()
+        },
+    },
+    PresentationUpdate {
+        node: scrollbar_thumb.clone(),
+        properties: PresentationPropertiesPatch {
+            y: Some(96.0),
+            ..PresentationPropertiesPatch::default()
+        },
+    },
+])?;
+```
+
+Each packet has one through 256 distinct owned nodes and changes only `x`, `y`,
+`width`, and `height`; intrinsic text permits only `x` and `y`. The SDK rejects
+empty, duplicate, non-finite, oversized, and over-64-KiB packets before it
+writes them. The host validates ownership and the complete packet atomically at
+its renderer boundary.
+
+The newest unpresented packet wins. `Notification::PresentationStatus` later
+reports `Presented`, `Superseded`, or `Rejected`, but is advisory and coalesced:
+do not wait for one status per high-rate input sample. `Presented` reaches the
+host presentation call, not confirmed monitor scanout. Keep creates, removes,
+style changes, hierarchy changes, and other ordered work on `set_node`.
+
+`Client::connect` first requests CLP v2.1. If a v2.0-only host explicitly
+rejects that lifecycle request, it reconnects once using v2.0 without
+`Capability::Presentation`. In that case `present_scene` returns
+`CapabilityNotGranted`; it never expands a packet into individual `set_node`
+commands.
+
 ## Intrinsic scene text
 
 Request `Capability::Scene` and `Capability::Text`, then call `create_node`
@@ -219,6 +270,11 @@ replays every vector through the public client and an independent fake host.
 Update both files only from a reviewed core revision. The corpus complements,
 rather than replaces, this crate's focused fake-host tests and live
 conformance executable.
+
+The development tree also vendors the byte-checked CLP v2.1 presentation
+fixture in `fixtures/clp/v2.1`. It verifies the public client against an
+accepted atomic packet and a rejected intrinsic-text bounds packet, while the
+v2.0 replay verifies automatic one-time fallback.
 
 For an interactive M20 check in a graphical Chymeral session, run:
 
@@ -267,11 +323,13 @@ guide to Chymeral configuration and the complete runtime behavior.
 
 ## Version and contribution policy
 
-This crate's `1.0.x` line is the stable Rust binding for CLP v2.0. Chymeral
-application versions, CLP protocol versions, and SDK versions are independent:
-compatibility follows the negotiated CLP contract rather than matching version
-strings. The core Chymeral application is not a supported Rust library; this
-crate is the supported Rust client surface.
+This crate's `1.0.x` line is the stable Rust binding for CLP v2.0. The current
+source-tree v2.1 API is planned for the breaking `2.0.0` SDK line and is not
+published to `crates.io` yet. Chymeral application versions, CLP protocol
+versions, and SDK versions are independent: compatibility follows the
+negotiated CLP contract rather than matching version strings. The core
+Chymeral application is not a supported Rust library; this crate is the
+supported Rust client surface.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the public API,
 [CHANGELOG.md](CHANGELOG.md) for release history, and

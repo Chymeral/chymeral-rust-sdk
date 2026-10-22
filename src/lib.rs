@@ -1,4 +1,4 @@
-//! A synchronous, dependency-light reference client for CLP v2.0.
+//! A synchronous, dependency-light reference client for CLP v2.1.
 //!
 //! The crate speaks only the public Chymeral Link Protocol. It neither imports
 //! Chymeral internals nor creates a graphics window of its own.
@@ -26,10 +26,17 @@ pub const TOKEN_ENV: &str = "CHYMERAL_CLP_TOKEN";
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// The newest CLP version implemented by this SDK.
-pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);
+pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
+const CLP_PROTOCOL_V2_0: ProtocolVersion = ProtocolVersion::new(2, 0);
 const IO_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const IO_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const BINARY_FRAGMENT_BYTES: usize = 64 * 1024;
+/// Maximum geometry updates accepted in one frame-presentation packet.
+pub const MAX_PRESENTATION_UPDATES: usize = 256;
+/// Maximum UTF-8 byte length of a presentation identifier.
+pub const MAX_PRESENTATION_ID_BYTES: usize = 128;
+/// Maximum serialized JSON payload size for one presentation packet.
+pub const MAX_PRESENTATION_PACKET_BYTES: usize = 64 * 1024;
 
 /// A CLP protocol version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -71,6 +78,8 @@ pub enum Capability {
     ExternalDrop,
     /// Intrinsic scene text nodes with terminal-cell layout.
     Text,
+    /// Coalesced, frame-paced geometry presentation packets.
+    Presentation,
 }
 
 /// A deterministic set of negotiated or requested capabilities.
@@ -93,6 +102,7 @@ impl Capabilities {
             Capability::Overlap,
             Capability::ExternalDrop,
             Capability::Text,
+            Capability::Presentation,
         ])
     }
 
@@ -104,6 +114,12 @@ impl Capabilities {
     /// Iterates in wire-order-independent deterministic order.
     pub fn iter(&self) -> impl Iterator<Item = Capability> + '_ {
         self.0.iter().copied()
+    }
+
+    fn without(&self, capability: Capability) -> Self {
+        let mut capabilities = self.clone();
+        capabilities.0.remove(&capability);
+        capabilities
     }
 }
 
@@ -425,6 +441,72 @@ pub struct NodePropertiesPatch {
     /// Optional pointer and external-drop passthrough flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_passthrough: Option<bool>,
+}
+
+/// Geometry fields eligible for CLP's frame-paced presentation lane.
+///
+/// Presentation intentionally excludes hierarchy, content, visibility,
+/// stacking, clipping, and interaction flags. Use [`Client::set_node`] for
+/// those reliable retained-scene mutations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct PresentationPropertiesPatch {
+    /// Optional local x coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Optional local y coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    /// Optional width. Intrinsic text nodes cannot receive this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    /// Optional height. Intrinsic text nodes cannot receive this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+}
+
+impl PresentationPropertiesPatch {
+    /// Returns whether the patch contains no eligible visual change.
+    pub const fn is_empty(self) -> bool {
+        self.x.is_none() && self.y.is_none() && self.width.is_none() && self.height.is_none()
+    }
+}
+
+/// One geometry update in an atomic frame-presentation packet.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PresentationUpdate {
+    /// Session-owned node to update.
+    pub node: NodeHandle,
+    /// Geometry fields to replace when the packet reaches a rendered frame.
+    pub properties: PresentationPropertiesPatch,
+}
+
+/// Client-generated identity for an asynchronous presentation packet.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PresentationId(String);
+
+impl PresentationId {
+    /// Creates an explicit identifier for [`Client::present_scene_with_id`].
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty() || value.len() > MAX_PRESENTATION_ID_BYTES {
+            return Err(Error::InvalidInput(format!(
+                "a presentation_id must contain between 1 and {MAX_PRESENTATION_ID_BYTES} bytes"
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the protocol representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for PresentationId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
 }
 
 /// Complete node data used by [`Client::create_node`].
@@ -883,6 +965,38 @@ pub struct Resize {
     pub scale_factor: f64,
 }
 
+/// Outcome reported by the host for the newest observable presentation packet.
+///
+/// These notifications are themselves coalesced under sustained traffic. They
+/// are confirmation and diagnostics, not a per-packet acknowledgement queue;
+/// retain the application's newest desired visual state instead of waiting for
+/// every identifier to reappear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationState {
+    /// The packet's complete geometry state reached a presented host frame.
+    Presented,
+    /// Validation failed before the packet could mutate the scene.
+    Rejected,
+    /// A newer packet or a reliable scene mutation replaced this pending packet.
+    Superseded,
+}
+
+/// A coalesced asynchronous status for a [`PresentationId`].
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct PresentationStatus {
+    /// Client-generated packet identity.
+    pub presentation_id: PresentationId,
+    /// Final or latest observable state.
+    pub status: PresentationState,
+    /// Host error code when `status` is [`PresentationState::Rejected`].
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Host diagnostic when `status` is [`PresentationState::Rejected`].
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// A message delivered after the client completes the CLP lifecycle handshake.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notification {
@@ -896,6 +1010,8 @@ pub enum Notification {
     Resize(Resize),
     /// The host coalesced continuous notifications.
     DeliveryGap(Vec<DeliveryCategory>),
+    /// Coalesced state for an asynchronous frame-presentation packet.
+    PresentationStatus(PresentationStatus),
     /// The host asks the client to close during shutdown.
     Closing(CloseReason),
     /// Terminal session closure.
@@ -981,7 +1097,7 @@ impl From<serde_json::Error> for Error {
 /// Result type returned by public SDK operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A synchronous CLP v2.0 client.
+/// A synchronous CLP v2.1 client with one-time CLP v2.0 fallback.
 ///
 /// `connect_from_env` completes the `hello → init → init_complete → start →
 /// started` handshake. Its returned [`SessionInfo`] preserves the data from
@@ -991,6 +1107,7 @@ pub struct Client {
     reader: FrameReader,
     session: SessionInfo,
     next_request_id: u64,
+    next_presentation_id: u64,
     pending_notifications: VecDeque<Notification>,
     closed_reason: Option<CloseReason>,
 }
@@ -1015,6 +1132,35 @@ impl Client {
                 "the CLP token may not be empty".to_owned(),
             ));
         }
+        match Self::connect_once(
+            endpoint,
+            token,
+            requested_capabilities.clone(),
+            CLP_PROTOCOL_VERSION,
+        ) {
+            Err(Error::Host { code, .. })
+                if code == "unsupported_version" || code == "invalid_message" =>
+            {
+                // CLP v2.0 hosts predate the presentation capability and may
+                // reject its enum value before they reach version negotiation.
+                // Reconnect exactly once with the frozen v2.0 capability set.
+                Self::connect_once(
+                    endpoint,
+                    token,
+                    requested_capabilities.without(Capability::Presentation),
+                    CLP_PROTOCOL_V2_0,
+                )
+            }
+            result => result,
+        }
+    }
+
+    fn connect_once(
+        endpoint: &str,
+        token: &str,
+        requested_capabilities: Capabilities,
+        requested_protocol: ProtocolVersion,
+    ) -> Result<Self> {
         let name = endpoint
             .to_ns_name::<GenericNamespaced>()
             .map_err(|error| Error::InvalidInput(format!("invalid CLP endpoint: {error}")))?;
@@ -1028,7 +1174,7 @@ impl Client {
         write_json(
             &mut stream,
             &WireClientMessage::Hello {
-                protocol: CLP_PROTOCOL_VERSION,
+                protocol: requested_protocol,
                 token: token.to_owned(),
                 capabilities: requested_capabilities.iter().collect(),
             },
@@ -1048,11 +1194,9 @@ impl Client {
                 }
                 message => return Err(unexpected("init", message.name())),
             };
-        if protocol.major != CLP_PROTOCOL_VERSION.major
-            || protocol.minor > CLP_PROTOCOL_VERSION.minor
-        {
+        if protocol.major != requested_protocol.major || protocol.minor > requested_protocol.minor {
             return Err(Error::Protocol(format!(
-                "host negotiated unsupported version {protocol}; SDK supports {CLP_PROTOCOL_VERSION}"
+                "host negotiated unsupported version {protocol}; requested {requested_protocol}"
             )));
         }
         let session = SessionInfo {
@@ -1082,6 +1226,7 @@ impl Client {
             reader,
             session,
             next_request_id: 1,
+            next_presentation_id: 1,
             pending_notifications: VecDeque::new(),
             closed_reason: None,
         })
@@ -1172,6 +1317,90 @@ impl Client {
             WireCommandResult::NodeUpdated { text_metrics } => Ok(text_metrics),
             result => Err(unexpected_command_result("node_updated", result.name())),
         }
+    }
+
+    /// Sends the newest transient geometry state without waiting for a command
+    /// response. The host applies the complete packet atomically at a renderer
+    /// frame and later emits a coalesced [`Notification::PresentationStatus`].
+    ///
+    /// This method never falls back to individual [`Client::set_node`] calls on
+    /// a CLP v2.0 host. In that case it returns
+    /// [`Error::CapabilityNotGranted`] for [`Capability::Presentation`].
+    pub fn present_scene(
+        &mut self,
+        updates: impl IntoIterator<Item = PresentationUpdate>,
+    ) -> Result<PresentationId> {
+        let presentation_id = self.next_presentation_identifier();
+        self.present_scene_with_id(presentation_id.clone(), updates)?;
+        Ok(presentation_id)
+    }
+
+    /// Sends a frame-presentation packet with an application-supplied
+    /// identifier. Use this when application tracing needs to correlate an
+    /// exact local update with a later presentation status.
+    pub fn present_scene_with_id(
+        &mut self,
+        presentation_id: PresentationId,
+        updates: impl IntoIterator<Item = PresentationUpdate>,
+    ) -> Result<()> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::Presentation)?;
+        self.ensure_open()?;
+        let updates: Vec<_> = updates.into_iter().collect();
+        if updates.is_empty() {
+            return Err(Error::InvalidInput(
+                "a presentation packet requires at least one update".to_owned(),
+            ));
+        }
+        if updates.len() > MAX_PRESENTATION_UPDATES {
+            return Err(Error::InvalidInput(format!(
+                "a presentation packet may update at most {MAX_PRESENTATION_UPDATES} nodes"
+            )));
+        }
+        if updates.iter().any(|update| update.properties.is_empty()) {
+            return Err(Error::InvalidInput(
+                "a presentation update must change at least one geometry property".to_owned(),
+            ));
+        }
+        if presentation_id.as_str().is_empty()
+            || presentation_id.as_str().len() > MAX_PRESENTATION_ID_BYTES
+        {
+            return Err(Error::InvalidInput(format!(
+                "a presentation_id must contain between 1 and {MAX_PRESENTATION_ID_BYTES} bytes"
+            )));
+        }
+        let mut nodes = BTreeSet::new();
+        for update in &updates {
+            if !nodes.insert(update.node.as_str()) {
+                return Err(Error::InvalidInput(format!(
+                    "a presentation packet updates {} more than once",
+                    update.node.as_str()
+                )));
+            }
+            for (name, value) in [
+                ("x", update.properties.x),
+                ("y", update.properties.y),
+                ("width", update.properties.width),
+                ("height", update.properties.height),
+            ] {
+                if value.is_some_and(|value| !value.is_finite()) {
+                    return Err(Error::InvalidInput(format!(
+                        "presentation {name} must be finite"
+                    )));
+                }
+            }
+        }
+        let message = WireClientMessage::PresentScene {
+            presentation_id,
+            updates,
+        };
+        let payload = serde_json::to_vec(&message)?;
+        if payload.len() > MAX_PRESENTATION_PACKET_BYTES {
+            return Err(Error::InvalidInput(format!(
+                "a presentation packet may not exceed {MAX_PRESENTATION_PACKET_BYTES} bytes"
+            )));
+        }
+        self.write_client_frame(b'J', &payload)
     }
 
     /// Removes a node and all of its descendants.
@@ -1456,6 +1685,21 @@ impl Client {
                 self.expect_session(&session_id)?;
                 Ok(Some(Notification::DeliveryGap(categories)))
             }
+            WireHostMessage::PresentationStatus {
+                session_id,
+                presentation_id,
+                status,
+                code,
+                message,
+            } => {
+                self.expect_session(&session_id)?;
+                Ok(Some(Notification::PresentationStatus(PresentationStatus {
+                    presentation_id,
+                    status,
+                    code,
+                    message,
+                })))
+            }
             WireHostMessage::Closing { session_id, reason } => {
                 self.expect_session(&session_id)?;
                 Ok(Some(Notification::Closing(reason)))
@@ -1589,6 +1833,13 @@ impl Client {
         self.next_request_id = self.next_request_id.checked_add(1).unwrap_or(1);
         request_id
     }
+
+    fn next_presentation_identifier(&mut self) -> PresentationId {
+        let presentation_id =
+            PresentationId(format!("sdk-presentation-{}", self.next_presentation_id));
+        self.next_presentation_id = self.next_presentation_id.checked_add(1).unwrap_or(1);
+        presentation_id
+    }
 }
 
 #[derive(Serialize)]
@@ -1609,6 +1860,10 @@ enum WireClientMessage {
     Command {
         request_id: String,
         command: Box<WireSceneCommand>,
+    },
+    PresentScene {
+        presentation_id: PresentationId,
+        updates: Vec<PresentationUpdate>,
     },
     Subscribe {
         subscriptions: Vec<Subscription>,
@@ -1693,6 +1948,15 @@ enum WireHostMessage {
         session_id: SessionId,
         categories: Vec<DeliveryCategory>,
     },
+    PresentationStatus {
+        session_id: SessionId,
+        presentation_id: PresentationId,
+        status: PresentationState,
+        #[serde(default)]
+        code: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+    },
     Closing {
         session_id: SessionId,
         reason: CloseReason,
@@ -1727,6 +1991,7 @@ impl WireHostMessage {
             Self::Resize { .. } => "resize",
             Self::Subscribed { .. } => "subscribed",
             Self::DeliveryGap { .. } => "delivery_gap",
+            Self::PresentationStatus { .. } => "presentation_status",
             Self::Closing { .. } => "closing",
             Self::Closed { .. } => "closed",
             Self::Error { .. } => "error",
@@ -2039,11 +2304,72 @@ mod tests {
             serde_json::to_value(message).unwrap(),
             json!({
                 "type": "hello",
-                "protocol": { "major": 2, "minor": 0 },
+                "protocol": { "major": 2, "minor": 1 },
                 "token": "secret",
                 "capabilities": ["scene", "timing"]
             })
         );
+    }
+
+    #[test]
+    fn serializes_a_frame_presentation_without_a_command_identifier() {
+        let message = WireClientMessage::PresentScene {
+            presentation_id: PresentationId::new("application-frame-7").unwrap(),
+            updates: vec![
+                PresentationUpdate {
+                    node: NodeHandle("node-4".to_owned()),
+                    properties: PresentationPropertiesPatch {
+                        x: Some(48.0),
+                        y: Some(24.0),
+                        ..PresentationPropertiesPatch::default()
+                    },
+                },
+                PresentationUpdate {
+                    node: NodeHandle("node-5".to_owned()),
+                    properties: PresentationPropertiesPatch {
+                        width: Some(32.0),
+                        height: Some(16.0),
+                        ..PresentationPropertiesPatch::default()
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "present_scene",
+                "presentation_id": "application-frame-7",
+                "updates": [
+                    { "node": "node-4", "properties": { "x": 48.0, "y": 24.0 } },
+                    { "node": "node-5", "properties": { "width": 32.0, "height": 16.0 } }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_presentation_statuses() {
+        let message: WireHostMessage = serde_json::from_value(json!({
+            "type": "presentation_status",
+            "session_id": "session-1",
+            "presentation_id": "application-frame-7",
+            "status": "rejected",
+            "code": "invalid_node_change",
+            "message": "node-4 has intrinsic text bounds"
+        }))
+        .unwrap();
+        assert!(matches!(
+            message,
+            WireHostMessage::PresentationStatus {
+                presentation_id,
+                status: PresentationState::Rejected,
+                code: Some(code),
+                message: Some(message),
+                ..
+            } if presentation_id.as_str() == "application-frame-7"
+                && code == "invalid_node_change"
+                && message == "node-4 has intrinsic text bounds"
+        ));
     }
 
     #[test]

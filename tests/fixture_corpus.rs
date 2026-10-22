@@ -1,7 +1,8 @@
 use chymeral_rust_sdk::{
     Capabilities, Client, CloseReason, DeliveryCategory, Error, Event, ImageContactShape,
     ImageUpload, NodeChanges, NodeHandle, NodeInput, NodeProperties, NodePropertiesPatch,
-    Notification, ProgramPhase, SceneEvent, SceneLayer, Subscription, TextAlign,
+    Notification, PresentationId, PresentationPropertiesPatch, PresentationState,
+    PresentationUpdate, ProgramPhase, SceneEvent, SceneLayer, Subscription, TextAlign,
     TextNodeProperties, TextStyle, TextWeight,
 };
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName, prelude::*};
@@ -16,8 +17,10 @@ use std::{
 };
 
 const FIXTURE_TOKEN: &str = "fixture-token-not-a-secret";
-const FIXTURE_BYTES: &str = include_str!("../fixtures/clp/v2.0/fixtures.json");
-const FIXTURE_SHA256: &str = include_str!("../fixtures/clp/v2.0/SHA256SUMS");
+const FIXTURE_V2_0_BYTES: &str = include_str!("../fixtures/clp/v2.0/fixtures.json");
+const FIXTURE_V2_0_SHA256: &str = include_str!("../fixtures/clp/v2.0/SHA256SUMS");
+const FIXTURE_V2_1_BYTES: &str = include_str!("../fixtures/clp/v2.1/fixtures.json");
+const FIXTURE_V2_1_SHA256: &str = include_str!("../fixtures/clp/v2.1/SHA256SUMS");
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -75,27 +78,106 @@ enum FixtureKind {
 
 #[test]
 fn replays_the_vendored_canonical_clp_v2_fixture_corpus_through_the_public_client() {
-    let corpus = load_fixture_corpus();
+    let corpus = load_fixture_corpus(FIXTURE_V2_0_BYTES, FIXTURE_V2_0_SHA256, 0);
     replay_lifecycle(&corpus);
     replay_scene_and_overlap(&corpus);
     replay_images(&corpus);
     replay_delivery_errors_and_fault_close(&corpus);
 }
 
-fn load_fixture_corpus() -> FixtureCorpus {
-    let expected_hash = FIXTURE_SHA256
+#[test]
+fn replays_the_vendored_clp_v2_1_presentation_fixture_through_the_public_client() {
+    let corpus = load_fixture_corpus(FIXTURE_V2_1_BYTES, FIXTURE_V2_1_SHA256, 1);
+    let (endpoint, host) = spawn_fixture_host(vector(&corpus, "frame-presentation").frames.clone());
+    let mut client = Client::connect(&endpoint, FIXTURE_TOKEN, Capabilities::all())
+        .expect("v2.1 fixture handshake should succeed");
+
+    assert_eq!(client.session().protocol_version.minor, 1);
+    assert!(client.has_capability(chymeral_rust_sdk::Capability::Presentation));
+    let first = PresentationId::new("fixture-presentation-1").unwrap();
+    let node_one: NodeHandle = serde_json::from_str("\"node-1\"").unwrap();
+    let node_two: NodeHandle = serde_json::from_str("\"node-2\"").unwrap();
+    client
+        .present_scene_with_id(
+            first.clone(),
+            [
+                PresentationUpdate {
+                    node: node_one,
+                    properties: PresentationPropertiesPatch {
+                        x: Some(96.0),
+                        y: Some(64.0),
+                        ..PresentationPropertiesPatch::default()
+                    },
+                },
+                PresentationUpdate {
+                    node: node_two,
+                    properties: PresentationPropertiesPatch {
+                        width: Some(48.0),
+                        height: Some(24.0),
+                        ..PresentationPropertiesPatch::default()
+                    },
+                },
+            ],
+        )
+        .expect("presentation packet should be written without a command response");
+    assert!(matches!(
+        client.next_notification().expect("presented status"),
+        Notification::PresentationStatus(status)
+            if status.presentation_id == first
+                && status.status == PresentationState::Presented
+                && status.code.is_none()
+                && status.message.is_none()
+    ));
+
+    let second = PresentationId::new("fixture-presentation-2").unwrap();
+    let node_three: NodeHandle = serde_json::from_str("\"node-3\"").unwrap();
+    client
+        .present_scene_with_id(
+            second.clone(),
+            [PresentationUpdate {
+                node: node_three,
+                properties: PresentationPropertiesPatch {
+                    width: Some(88.0),
+                    ..PresentationPropertiesPatch::default()
+                },
+            }],
+        )
+        .expect("rejected presentation packet should still be sent");
+    assert!(matches!(
+        client.next_notification().expect("rejected status"),
+        Notification::PresentationStatus(status)
+            if status.presentation_id == second
+                && status.status == PresentationState::Rejected
+                && status.code.as_deref() == Some("invalid_node_change")
+                && status.message.as_deref()
+                    == Some("node-3 has intrinsic text bounds that cannot be set directly")
+    ));
+
+    assert_eq!(
+        client.close().expect("fixture close should succeed"),
+        CloseReason::ClientRequested
+    );
+    join_host(host);
+}
+
+fn load_fixture_corpus(
+    fixture_bytes: &str,
+    fixture_checksum: &str,
+    expected_minor: u16,
+) -> FixtureCorpus {
+    let expected_hash = fixture_checksum
         .split_whitespace()
         .next()
         .expect("fixture SHA256SUMS must contain a checksum");
-    let actual_hash = format!("{:x}", Sha256::digest(FIXTURE_BYTES.as_bytes()));
+    let actual_hash = format!("{:x}", Sha256::digest(fixture_bytes.as_bytes()));
     assert_eq!(actual_hash, expected_hash);
 
     let corpus: FixtureCorpus =
-        serde_json::from_str(FIXTURE_BYTES).expect("fixture corpus must be valid JSON");
+        serde_json::from_str(fixture_bytes).expect("fixture corpus must be valid JSON");
     assert_eq!(corpus.format, "chymeral-clp-fixture-corpus");
     assert_eq!(corpus.fixture_version, 1);
     assert_eq!(corpus.protocol.major, 2);
-    assert_eq!(corpus.protocol.minor, 0);
+    assert_eq!(corpus.protocol.minor, expected_minor);
     assert_eq!(corpus.transport.maximum_frame_bytes, MAX_FRAME_BYTES);
     assert_eq!(corpus.transport.json_discriminator, "J");
     assert_eq!(corpus.transport.binary_discriminator, "B");
@@ -364,7 +446,8 @@ fn connect_fixture_session(
             .chain(vector(corpus, vector_id).frames.iter().cloned())
             .collect()
     };
-    let (endpoint, host) = spawn_fixture_host(frames);
+    let (endpoint, host) =
+        spawn_fixture_host_with_legacy_fallback(frames, corpus.protocol.minor == 0);
     let client = Client::connect(&endpoint, FIXTURE_TOKEN, Capabilities::all())
         .expect("fixture handshake should succeed");
     (client, host)
@@ -381,6 +464,13 @@ fn vector<'a>(corpus: &'a FixtureCorpus, id: &str) -> &'a FixtureVector {
 fn spawn_fixture_host(
     frames: Vec<FixtureFrame>,
 ) -> (String, JoinHandle<std::result::Result<(), String>>) {
+    spawn_fixture_host_with_legacy_fallback(frames, false)
+}
+
+fn spawn_fixture_host_with_legacy_fallback(
+    frames: Vec<FixtureFrame>,
+    legacy_fallback: bool,
+) -> (String, JoinHandle<std::result::Result<(), String>>) {
     let endpoint = format!(
         "chymeral-rust-sdk-fixture-{}-{}",
         std::process::id(),
@@ -395,6 +485,31 @@ fn spawn_fixture_host(
         .create_sync()
         .expect("fixture listener must start");
     let host = thread::spawn(move || {
+        if legacy_fallback {
+            let mut stream = listener
+                .accept()
+                .map_err(|error| format!("fixture fallback accept failed: {error}"))?;
+            let (kind, payload) = read_frame(&mut stream)?;
+            if kind != b'J' {
+                return Err("fixture fallback expected a client JSON hello".to_owned());
+            }
+            let hello: Value = serde_json::from_slice(&payload).map_err(|error| {
+                format!("fixture fallback received invalid hello JSON: {error}")
+            })?;
+            if message_type(&hello)? != "hello"
+                || hello.pointer("/protocol/minor").and_then(Value::as_u64) != Some(1)
+            {
+                return Err("fixture fallback expected a CLP v2.1 hello".to_owned());
+            }
+            let rejection = serde_json::json!({
+                "type": "error",
+                "code": "unsupported_version",
+                "message": "fixture host only supports CLP v2.0"
+            });
+            let rejection = serde_json::to_vec(&rejection)
+                .map_err(|error| format!("fixture fallback error encode failed: {error}"))?;
+            write_frame(&mut stream, b'J', &rejection)?;
+        }
         let mut stream = listener
             .accept()
             .map_err(|error| format!("fixture host accept failed: {error}"))?;

@@ -6,7 +6,25 @@ application and CLP protocol have independent version lines.
 
 ## [Unreleased]
 
-No unreleased public API changes.
+### Added
+
+- Development CLP v2.1 support for `Capability::Presentation`,
+  `PresentationId`, `PresentationUpdate`, `PresentationPropertiesPatch`,
+  `PresentationStatus`, `Client::present_scene`, and
+  `Client::present_scene_with_id`.
+- Byte-checked CLP v2.1 fixture replay for an accepted packet and a rejected
+  intrinsic-text bounds update.
+
+### Changed
+
+- Connection now retries once with the frozen CLP v2.0 capability set when a
+  v2.0-only host rejects the initial v2.1 lifecycle request. Presentation never
+  falls back to individual `set_node` commands.
+
+### Compatibility
+
+- These unreleased APIs target the breaking `2.0.0` SDK line. Published `1.0.x`
+  remains the stable CLP v2.0 binding.
 
 ## [1.0.0] - 2026-10-17
 
