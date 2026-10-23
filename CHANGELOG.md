@@ -6,6 +6,11 @@ application and CLP protocol have independent version lines.
 
 ## [Unreleased]
 
+### Fixed
+
+- Replaced the internal M20 milestone label in the interactive conformance
+  example and README with stable CLP v2.1 wording.
+
 ## [1.5.0] - 2026-10-22
 
 ### Added

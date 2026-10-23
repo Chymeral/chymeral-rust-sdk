@@ -326,7 +326,7 @@ packet, a rejected intrinsic-text bounds packet, and application window
 metadata patch preservation and clearing, while the v2.0 replay verifies
 automatic one-time fallback.
 
-For an interactive M20 check in a graphical Chymeral session, run:
+For interactive scene validation in a graphical Chymeral session, run:
 
 ```text
 cargo run --example clp_conformance -- --manual
@@ -367,7 +367,7 @@ language SDKs have the same status when they preserve the negotiated lifecycle,
 capability, ownership, and delivery contracts. The Node SDK is published on
 [npm](https://www.npmjs.com/package/@chymeral/node-sdk).
 
-See the [Technical Journal](Technical_Journal.md) for the M14–M20 record and
+See the [Technical Journal](Technical_Journal.md) for the M14–M25 record and
 design decisions. The host repository's `Main_Manual.md` is the authoritative
 guide to Chymeral configuration and the complete runtime behavior.
 
