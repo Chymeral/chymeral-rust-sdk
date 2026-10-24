@@ -1,10 +1,10 @@
-//! A synchronous, dependency-light reference client for CLP v2.1.
+//! A synchronous, dependency-light reference client for CLP v2.4.
 //!
 //! The crate speaks only the public Chymeral Link Protocol. It neither imports
 //! Chymeral internals nor creates a graphics window of its own.
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     error::Error as StdError,
     fmt::{Display, Formatter},
@@ -26,7 +26,7 @@ pub const TOKEN_ENV: &str = "CHYMERAL_CLP_TOKEN";
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// The newest CLP version implemented by this SDK.
-pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 1);
+pub const CLP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 4);
 const CLP_PROTOCOL_V2_0: ProtocolVersion = ProtocolVersion::new(2, 0);
 const IO_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const IO_STALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,6 +43,12 @@ pub const MAX_WINDOW_TITLE_BYTES: usize = 256;
 pub const MAX_WINDOW_ICON_DIMENSION: u32 = 256;
 /// Maximum RGBA8 byte length of an application window icon.
 pub const MAX_WINDOW_ICON_BYTES: usize = 256 * 1024;
+/// Maximum structural operations accepted in one atomic scene batch.
+pub const MAX_SCENE_BATCH_OPERATIONS: usize = 512;
+/// Maximum UTF-8 byte length of one serialized scene-batch command envelope.
+pub const MAX_SCENE_BATCH_BYTES: usize = 512 * 1024;
+/// Maximum UTF-8 byte length of one batch-local node alias.
+pub const MAX_SCENE_BATCH_ALIAS_BYTES: usize = 128;
 
 /// A CLP protocol version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -88,6 +94,8 @@ pub enum Capability {
     Presentation,
     /// Session-owned application window title and static icon metadata.
     WindowMetadata,
+    /// Bounded atomic construction or revision of retained scene structure.
+    SceneBatch,
 }
 
 /// A deterministic set of negotiated or requested capabilities.
@@ -112,6 +120,7 @@ impl Capabilities {
             Capability::Text,
             Capability::Presentation,
             Capability::WindowMetadata,
+            Capability::SceneBatch,
         ])
     }
 
@@ -471,7 +480,7 @@ pub struct TextMetrics {
 }
 
 /// A newly created node and optional metrics for intrinsic text.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct CreatedNode {
     /// Opaque node handle.
     pub node: NodeHandle,
@@ -692,6 +701,234 @@ pub struct NodeChanges {
     /// Text-style replacement. Visual nodes may not receive text changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_style: Option<TextStyle>,
+}
+
+/// A node reference used while assembling one [`SceneBatch`].
+///
+/// A [`BatchNodeRef::Handle`] identifies an existing session-owned node. An
+/// [`BatchNodeRef::Alias`] identifies a node created by an earlier operation
+/// in the same batch. Aliases are never retained by Chymeral after the batch
+/// completes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum BatchNodeRef {
+    /// An opaque handle returned by an earlier successful host command.
+    Handle(NodeHandle),
+    /// A batch-local alias for an earlier `create_node` operation.
+    Alias {
+        /// The declared alias.
+        alias: String,
+    },
+}
+
+impl BatchNodeRef {
+    /// Creates a batch-local alias reference.
+    pub fn alias(alias: impl Into<String>) -> Self {
+        Self::Alias {
+            alias: alias.into(),
+        }
+    }
+}
+
+impl From<NodeHandle> for BatchNodeRef {
+    fn from(handle: NodeHandle) -> Self {
+        Self::Handle(handle)
+    }
+}
+
+impl From<&NodeHandle> for BatchNodeRef {
+    fn from(handle: &NodeHandle) -> Self {
+        Self::Handle(handle.clone())
+    }
+}
+
+/// A structural parent change used by a [`SceneBatchOperation::SetNode`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BatchNodeParent {
+    /// Make the node a root.
+    Root,
+    /// Attach the node below a referenced parent.
+    Node {
+        /// Existing handle or earlier batch alias for the parent.
+        node: BatchNodeRef,
+    },
+}
+
+/// Partial node changes accepted in one [`SceneBatch`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct SceneBatchNodeChanges {
+    /// Partial geometry and interaction-property changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<NodePropertiesPatch>,
+    /// Structural parent change; omit to preserve the current parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<BatchNodeParent>,
+    /// Root drawing-layer change; omit to preserve the current layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<SceneLayer>,
+    /// Visual replacement. Text nodes may not receive visual changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual: Option<NodeVisual>,
+    /// Text replacement. Visual nodes may not receive text changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Text-style replacement. Visual nodes may not receive text changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_style: Option<TextStyle>,
+}
+
+impl From<NodeChanges> for SceneBatchNodeChanges {
+    fn from(changes: NodeChanges) -> Self {
+        Self {
+            properties: changes.properties,
+            parent: changes.parent.map(|parent| match parent {
+                NodeParent::Root => BatchNodeParent::Root,
+                NodeParent::Node { node } => BatchNodeParent::Node {
+                    node: BatchNodeRef::Handle(node),
+                },
+            }),
+            layer: changes.layer,
+            visual: changes.visual,
+            text: changes.text,
+            text_style: changes.text_style,
+        }
+    }
+}
+
+/// One ordered structural operation in an atomic [`SceneBatch`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SceneBatchOperation {
+    /// Create a root or child node and bind its batch-local alias.
+    CreateNode {
+        /// Alias returned in the batch result and available to later operations.
+        alias: String,
+        /// Parent handle or earlier alias. Omit for a root node.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<BatchNodeRef>,
+        /// Root drawing layer. It is invalid for child nodes.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        layer: Option<SceneLayer>,
+        /// Complete node content and properties.
+        node: NodeInput,
+    },
+    /// Update an existing node or one created earlier in the batch.
+    SetNode {
+        /// Existing handle or earlier alias to update.
+        node: BatchNodeRef,
+        /// Changes to apply atomically with the rest of the batch.
+        changes: SceneBatchNodeChanges,
+    },
+    /// Remove an existing node or one created earlier in the batch.
+    RemoveNode {
+        /// Existing handle or earlier alias to remove with its descendants.
+        node: BatchNodeRef,
+    },
+}
+
+/// Builder for a bounded atomic structural scene command.
+///
+/// Use [`Client::apply_scene_batch`] to send the completed builder. Chymeral
+/// validates every operation, commits a successful batch as one retained scene
+/// state, and requests one redraw. This is not a virtual-DOM layer and does
+/// not replace incremental [`Client::create_node`] or [`Client::set_node`]
+/// commands.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SceneBatch {
+    operations: Vec<SceneBatchOperation>,
+}
+
+impl SceneBatch {
+    /// Creates an empty scene batch.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a batch from explicit ordered operations.
+    pub fn from_operations(operations: Vec<SceneBatchOperation>) -> Self {
+        Self { operations }
+    }
+
+    /// Returns the ordered operations without consuming the builder.
+    pub fn operations(&self) -> &[SceneBatchOperation] {
+        &self.operations
+    }
+
+    /// Appends an explicit operation and returns the same builder.
+    pub fn push(&mut self, operation: SceneBatchOperation) -> &mut Self {
+        self.operations.push(operation);
+        self
+    }
+
+    /// Appends a node creation and returns the builder for fluent composition.
+    pub fn create_node(
+        mut self,
+        alias: impl Into<String>,
+        parent: Option<BatchNodeRef>,
+        layer: Option<SceneLayer>,
+        node: NodeInput,
+    ) -> Self {
+        self.operations.push(SceneBatchOperation::CreateNode {
+            alias: alias.into(),
+            parent,
+            layer,
+            node,
+        });
+        self
+    }
+
+    /// Appends a node update and returns the builder for fluent composition.
+    pub fn set_node(
+        mut self,
+        node: impl Into<BatchNodeRef>,
+        changes: SceneBatchNodeChanges,
+    ) -> Self {
+        self.operations.push(SceneBatchOperation::SetNode {
+            node: node.into(),
+            changes,
+        });
+        self
+    }
+
+    /// Appends a node removal and returns the builder for fluent composition.
+    pub fn remove_node(mut self, node: impl Into<BatchNodeRef>) -> Self {
+        self.operations
+            .push(SceneBatchOperation::RemoveNode { node: node.into() });
+        self
+    }
+
+    fn into_operations(self) -> Vec<SceneBatchOperation> {
+        self.operations
+    }
+}
+
+/// Outcome of one [`SceneBatchOperation`] in a successful batch result.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SceneBatchOperationResult {
+    /// A node was created and remains addressable through its alias.
+    Created {
+        /// The alias supplied by the operation.
+        alias: String,
+    },
+    /// A node update was applied.
+    Updated {
+        /// Fresh metrics when the update changed intrinsic text content or style.
+        #[serde(default)]
+        text_metrics: Option<TextMetrics>,
+    },
+    /// A node and its descendants were removed.
+    Removed,
+}
+
+/// Result returned by [`Client::apply_scene_batch`].
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct SceneBatchResult {
+    /// Opaque handles for every batch alias that remains live after commit.
+    pub nodes: BTreeMap<String, CreatedNode>,
+    /// Ordered outcomes aligned with the submitted operations.
+    pub operations: Vec<SceneBatchOperationResult>,
 }
 
 /// Bytes submitted with [`Client::upload_image`].
@@ -1186,7 +1423,7 @@ impl From<serde_json::Error> for Error {
 /// Result type returned by public SDK operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A synchronous CLP v2.1 client with one-time CLP v2.0 fallback.
+/// A synchronous CLP v2.4 client with one-time CLP v2.0 fallback.
 ///
 /// `connect_from_env` completes the `hello → init → init_complete → start →
 /// started` handshake. Its returned [`SessionInfo`] preserves the data from
@@ -1231,15 +1468,16 @@ impl Client {
                 if code == "unsupported_version" || code == "invalid_message" =>
             {
                 // CLP v2.0 hosts predate the v2.1 presentation and window
-                // metadata capabilities and may reject either enum value
-                // before they reach version negotiation. Reconnect exactly
-                // once with the frozen v2.0 capability set.
+                // metadata capabilities plus v2.4 scene batches, and may
+                // reject either newer enum value before version negotiation.
+                // Reconnect exactly once with the frozen v2.0 capability set.
                 Self::connect_once(
                     endpoint,
                     token,
                     requested_capabilities
                         .without(Capability::Presentation)
-                        .without(Capability::WindowMetadata),
+                        .without(Capability::WindowMetadata)
+                        .without(Capability::SceneBatch),
                     CLP_PROTOCOL_V2_0,
                 )
             }
@@ -1408,6 +1646,30 @@ impl Client {
         )? {
             WireCommandResult::NodeUpdated { text_metrics } => Ok(text_metrics),
             result => Err(unexpected_command_result("node_updated", result.name())),
+        }
+    }
+
+    /// Applies a bounded structural scene batch as one retained-scene state.
+    ///
+    /// Chymeral validates the whole batch before making its final state
+    /// observable and requests one redraw after a successful commit. Aliases
+    /// only refer to nodes created by earlier operations in the same batch;
+    /// use the returned [`SceneBatchResult`] to retain their opaque handles.
+    ///
+    /// This method deliberately does **not** replay a batch through sequential
+    /// [`Client::create_node`] or [`Client::set_node`] calls when the host does
+    /// not grant [`Capability::SceneBatch`]. It instead returns
+    /// [`Error::CapabilityNotGranted`], so an application can explicitly
+    /// choose its own compatible incremental path without risking a visible
+    /// partial first paint.
+    pub fn apply_scene_batch(&mut self, batch: SceneBatch) -> Result<SceneBatchResult> {
+        self.require(Capability::Scene)?;
+        self.require(Capability::SceneBatch)?;
+        let operations = batch.into_operations();
+        self.validate_scene_batch(&operations)?;
+        match self.command(WireSceneCommand::SceneBatch { operations }, None)? {
+            WireCommandResult::SceneBatch(batch) => Ok(batch),
+            result => Err(unexpected_command_result("scene_batch", result.name())),
         }
     }
 
@@ -1657,10 +1919,18 @@ impl Client {
     ) -> Result<WireCommandResult> {
         self.ensure_open()?;
         let request_id = self.next_request_id();
-        self.write_client_json(&WireClientMessage::Command {
+        let scene_batch = matches!(&command, WireSceneCommand::SceneBatch { .. });
+        let message = WireClientMessage::Command {
             request_id: request_id.clone(),
             command: Box::new(command),
-        })?;
+        };
+        let payload = serde_json::to_vec(&message)?;
+        if scene_batch && payload.len() > MAX_SCENE_BATCH_BYTES {
+            return Err(Error::InvalidInput(format!(
+                "a scene batch may not exceed {MAX_SCENE_BATCH_BYTES} bytes"
+            )));
+        }
+        self.write_client_frame(b'J', &payload)?;
         if let Some(binary_payload) = binary_payload {
             for fragment in binary_payload.chunks(BINARY_FRAGMENT_BYTES) {
                 self.write_client_frame(b'B', fragment)?;
@@ -1898,6 +2168,128 @@ impl Client {
         Ok(())
     }
 
+    fn validate_scene_batch(&self, operations: &[SceneBatchOperation]) -> Result<()> {
+        if operations.is_empty() {
+            return Err(Error::InvalidInput(
+                "a scene batch requires at least one operation".to_owned(),
+            ));
+        }
+        if operations.len() > MAX_SCENE_BATCH_OPERATIONS {
+            return Err(Error::InvalidInput(format!(
+                "a scene batch may contain at most {MAX_SCENE_BATCH_OPERATIONS} operations"
+            )));
+        }
+
+        let mut aliases = BTreeSet::new();
+        for operation in operations {
+            match operation {
+                SceneBatchOperation::CreateNode {
+                    alias,
+                    parent,
+                    layer,
+                    node,
+                } => {
+                    Self::validate_scene_batch_alias(alias)?;
+                    if aliases.contains(alias) {
+                        return Err(Error::InvalidInput(format!(
+                            "the scene batch alias {alias:?} is declared more than once"
+                        )));
+                    }
+                    if let Some(parent) = parent {
+                        self.validate_scene_batch_node_ref(parent, &aliases)?;
+                        if layer.is_some() {
+                            return Err(Error::InvalidInput(
+                                "only root nodes may specify a layer".to_owned(),
+                            ));
+                        }
+                    }
+                    self.require_node_input(node)?;
+                    aliases.insert(alias.clone());
+                }
+                SceneBatchOperation::SetNode { node, changes } => {
+                    self.validate_scene_batch_node_ref(node, &aliases)?;
+                    self.require_scene_batch_node_changes(changes)?;
+                    if let Some(parent) = &changes.parent {
+                        match parent {
+                            BatchNodeParent::Root => {}
+                            BatchNodeParent::Node { node } => {
+                                self.validate_scene_batch_node_ref(node, &aliases)?;
+                                if changes.layer.is_some() {
+                                    return Err(Error::InvalidInput(
+                                        "only root nodes may specify a layer".to_owned(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                SceneBatchOperation::RemoveNode { node } => {
+                    self.validate_scene_batch_node_ref(node, &aliases)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_scene_batch_alias(alias: &str) -> Result<()> {
+        if alias.is_empty() {
+            return Err(Error::InvalidInput(
+                "a scene batch alias must not be empty".to_owned(),
+            ));
+        }
+        if alias.len() > MAX_SCENE_BATCH_ALIAS_BYTES {
+            return Err(Error::InvalidInput(format!(
+                "a scene batch alias may not exceed {MAX_SCENE_BATCH_ALIAS_BYTES} bytes"
+            )));
+        }
+        if alias.chars().any(char::is_control) {
+            return Err(Error::InvalidInput(
+                "a scene batch alias may not contain control characters".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_scene_batch_node_ref(
+        &self,
+        node: &BatchNodeRef,
+        aliases: &BTreeSet<String>,
+    ) -> Result<()> {
+        match node {
+            BatchNodeRef::Handle(_) => Ok(()),
+            BatchNodeRef::Alias { alias } => {
+                Self::validate_scene_batch_alias(alias)?;
+                if aliases.contains(alias) {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidInput(format!(
+                        "the scene batch alias {alias:?} has not been declared"
+                    )))
+                }
+            }
+        }
+    }
+
+    fn require_scene_batch_node_changes(&self, changes: &SceneBatchNodeChanges) -> Result<()> {
+        self.require(Capability::Scene)?;
+        if let Some(properties) = changes.properties {
+            if properties.overlap_enabled.is_some() {
+                self.require(Capability::Overlap)?;
+            }
+            if properties.external_drop_enabled.is_some() {
+                self.require(Capability::ExternalDrop)?;
+            }
+        }
+        if let Some(NodeVisual::Image { contact_shape, .. }) = &changes.visual {
+            self.require(Capability::Images)?;
+            self.validate_image_contact_shape(*contact_shape)?;
+        }
+        if changes.text.is_some() || changes.text_style.is_some() {
+            self.require(Capability::Text)?;
+        }
+        Ok(())
+    }
+
     fn require_node_properties(&self, properties: &NodeProperties) -> Result<()> {
         if properties.overlap_enabled {
             self.require(Capability::Overlap)?;
@@ -1987,6 +2379,9 @@ enum WireClientMessage {
 #[derive(Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum WireSceneCommand {
+    SceneBatch {
+        operations: Vec<SceneBatchOperation>,
+    },
     CreateNode {
         #[serde(skip_serializing_if = "Option::is_none")]
         parent: Option<NodeHandle>,
@@ -2124,6 +2519,7 @@ impl WireHostMessage {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WireCommandResult {
+    SceneBatch(SceneBatchResult),
     Node {
         node: NodeHandle,
         #[serde(default)]
@@ -2151,6 +2547,7 @@ enum WireCommandResult {
 impl WireCommandResult {
     fn name(&self) -> &'static str {
         match self {
+            Self::SceneBatch(_) => "scene_batch",
             Self::Node { .. } => "node",
             Self::NodeUpdated { .. } => "node_updated",
             Self::Image { .. } => "image",
@@ -2455,7 +2852,7 @@ mod tests {
             serde_json::to_value(message).unwrap(),
             json!({
                 "type": "hello",
-                "protocol": { "major": 2, "minor": 1 },
+                "protocol": { "major": 2, "minor": 4 },
                 "token": "secret",
                 "capabilities": ["scene", "timing"]
             })
@@ -2674,6 +3071,163 @@ mod tests {
                     }
                 }
             })
+        );
+    }
+
+    #[test]
+    fn serializes_a_scene_batch_with_aliases_and_structural_changes() {
+        let batch = SceneBatch::new()
+            .create_node(
+                "panel",
+                None,
+                Some(SceneLayer::Overlay),
+                NodeInput::Rectangle {
+                    properties: NodeProperties {
+                        z_index: 3,
+                        ..NodeProperties::new(8.0, 12.0, 240.0, 120.0)
+                    },
+                    color: [36, 88, 216, 255],
+                },
+            )
+            .create_node(
+                "label",
+                Some(BatchNodeRef::alias("panel")),
+                None,
+                NodeInput::Text {
+                    properties: TextNodeProperties::new(16.0, 24.0),
+                    text: "Ready".to_owned(),
+                    style: TextStyle::default(),
+                },
+            )
+            .set_node(
+                BatchNodeRef::alias("panel"),
+                SceneBatchNodeChanges {
+                    properties: Some(NodePropertiesPatch {
+                        x: Some(20.0),
+                        clip_children: Some(true),
+                        ..NodePropertiesPatch::default()
+                    }),
+                    ..SceneBatchNodeChanges::default()
+                },
+            );
+        let message = WireClientMessage::Command {
+            request_id: "sdk-12".to_owned(),
+            command: Box::new(WireSceneCommand::SceneBatch {
+                operations: batch.into_operations(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            json!({
+                "type": "command",
+                "request_id": "sdk-12",
+                "command": {
+                    "op": "scene_batch",
+                    "operations": [
+                        {
+                            "op": "create_node",
+                            "alias": "panel",
+                            "layer": "overlay",
+                            "node": {
+                                "kind": "rectangle",
+                                "properties": {
+                                    "x": 8.0,
+                                    "y": 12.0,
+                                    "width": 240.0,
+                                    "height": 120.0,
+                                    "visible": true,
+                                    "clip_children": false,
+                                    "z_index": 3,
+                                    "overlap_enabled": false,
+                                    "external_drop_enabled": false,
+                                    "input_passthrough": false
+                                },
+                                "color": [36, 88, 216, 255]
+                            }
+                        },
+                        {
+                            "op": "create_node",
+                            "alias": "label",
+                            "parent": { "alias": "panel" },
+                            "node": {
+                                "kind": "text",
+                                "properties": {
+                                    "x": 16.0,
+                                    "y": 24.0,
+                                    "visible": true,
+                                    "clip_children": false,
+                                    "z_index": 0,
+                                    "overlap_enabled": false,
+                                    "external_drop_enabled": false,
+                                    "input_passthrough": false
+                                },
+                                "text": "Ready",
+                                "style": { "weight": "normal", "align": "start" }
+                            }
+                        },
+                        {
+                            "op": "set_node",
+                            "node": { "alias": "panel" },
+                            "changes": {
+                                "properties": { "x": 20.0, "clip_children": true }
+                            }
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_scene_batch_handles_metrics_and_operation_outcomes() {
+        let message: WireHostMessage = serde_json::from_value(json!({
+            "type": "result",
+            "request_id": "sdk-12",
+            "result": {
+                "kind": "scene_batch",
+                "nodes": {
+                    "label": {
+                        "node": "node-2",
+                        "text_metrics": {
+                            "columns": 5,
+                            "rows": 1,
+                            "width": 48.0,
+                            "height": 20.0
+                        }
+                    },
+                    "panel": { "node": "node-1" }
+                },
+                "operations": [
+                    { "kind": "created", "alias": "panel" },
+                    { "kind": "created", "alias": "label" },
+                    { "kind": "updated" }
+                ]
+            }
+        }))
+        .unwrap();
+        let WireHostMessage::Result {
+            result: WireCommandResult::SceneBatch(batch),
+            ..
+        } = message
+        else {
+            panic!("expected a scene batch command result");
+        };
+
+        assert_eq!(batch.nodes["panel"].node.as_str(), "node-1");
+        assert_eq!(batch.nodes["label"].node.as_str(), "node-2");
+        assert_eq!(batch.nodes["label"].text_metrics.unwrap().columns, 5);
+        assert_eq!(
+            batch.operations,
+            vec![
+                SceneBatchOperationResult::Created {
+                    alias: "panel".to_owned(),
+                },
+                SceneBatchOperationResult::Created {
+                    alias: "label".to_owned(),
+                },
+                SceneBatchOperationResult::Updated { text_metrics: None },
+            ]
         );
     }
 

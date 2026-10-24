@@ -58,14 +58,17 @@ describe the same release.
 ## Public API and protocol rules
 
 Published `1.5.x` is a typed binding for CLP v2.1 with one-time v2.0 fallback.
-The earlier `1.0.x` line implements CLP v2.0; the future breaking `2.0.0` line
-is reserved for the separately validated M26 platform expansion.
-Preserve the synchronous, no-async runtime design unless a proposed major-version change says otherwise.
+The `current-dev` `1.7.0` line adds CLP v2.4 scene batches while retaining that
+fallback. The earlier `1.0.x` line implements CLP v2.0; the future breaking
+`2.0.0` line is reserved for the separately validated platform expansion.
+Preserve the synchronous, no-async runtime design unless a proposed major-
+version change says otherwise.
 Changes to public types, methods, serialization, error codes, or lifecycle
 behavior need documentation, focused tests, and a corresponding conformance
-update. A v2.1 client must retain its one-time v2.0 fallback, must never expand
-presentation packets into ordered node commands, and must remove both
-v2.1-only capabilities from its v2.0 retry.
+update. A v2.4 client must retain its one-time v2.0 fallback, must never expand
+presentation packets or scene batches into ordered node commands, and must
+remove `presentation`, `window_metadata`, and `scene_batch` from its v2.0
+retry.
 
 Use the versioned [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0)
 as the source of `fixtures/clp/v2.0/fixtures.json` and `SHA256SUMS`. Update
@@ -77,6 +80,12 @@ For a CLP v2.1 change, also update the reviewed
 [v2.1 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.1)
 and its vendored `fixtures/clp/v2.1` snapshot together. Check both hashes and
 keep the v2.0 replay to prove compatibility.
+
+For a CLP v2.4 change, also update the reviewed
+[v2.4 fixture corpus](https://github.com/Chymeral/chymeral/tree/current-dev/protocol/fixtures/v2.4)
+and its vendored `fixtures/clp/v2.4` snapshot together. Check both hashes,
+retain the v2.0 and v2.1 replays, and add a live conformance case when the
+feature affects `SceneBatch` behavior.
 
 CLP is language-neutral. Do not add Rust-only protocol behavior, host internals
 as a dependency, silent compatibility aliases, or APIs that cannot be modeled

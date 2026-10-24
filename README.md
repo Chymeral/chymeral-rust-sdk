@@ -18,16 +18,17 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The published `1.5.0` crate supports the public **CLP v2.1** contract,
-including frame presentation and application window metadata. It retains a
-one-time v2.0 fallback for a v2.0-only host and no CLP v1.x command aliases.
-The SDK is synchronous by design and has no async-runtime dependency. Version
-`1.0.0` remains the first stable Rust binding, and `1.5.0` is available from
-[crates.io](https://crates.io/crates/chymeral-rust-sdk) with generated API
-documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk). The matching
-[GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
-records its human-readable release notes. Use a local path dependency only
-while developing changes against this repository.
+The released `1.5.0` crate supports public **CLP v2.1**, including frame
+presentation and application window metadata. The `current-dev` source line
+prepares `1.7.0` for **CLP v2.4**, adding reliable atomic scene batches. It
+retains a one-time v2.0 fallback for a v2.0-only host and no CLP v1.x command
+aliases. The SDK is synchronous by design and has no async-runtime dependency.
+Version `1.0.0` remains the first stable Rust binding, and the current release
+is available from [crates.io](https://crates.io/crates/chymeral-rust-sdk) with
+generated API documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk).
+The matching [GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
+records its human-readable release notes. Use a local path dependency while
+developing changes against this repository.
 
 ## What it provides
 
@@ -37,6 +38,8 @@ while developing changes against this repository.
   host notifications.
 - Typed scene commands for node creation, atomic mutation, removal, image
   ownership, and direct overlap queries.
+- A bounded `SceneBatch` builder for reliable atomic create/update/remove
+  revisions, with local aliases and no implicit sequential fallback.
 - Intrinsic scene-text nodes with terminal-cell metrics, text/style updates,
   and default terminal typography.
 - Unified session-owned RGBA8 and GIF image upload and removal.
@@ -76,7 +79,7 @@ Or declare it explicitly:
 
 ```toml
 [dependencies]
-chymeral-rust-sdk = "1.0"
+chymeral-rust-sdk = "1.5"
 ```
 
 For local development, reference the checked-out SDK instead:
@@ -85,6 +88,10 @@ For local development, reference the checked-out SDK instead:
 [dependencies]
 chymeral-rust-sdk = { path = "../chymeral-rust-sdk" }
 ```
+
+The published `1.5.x` crate implements CLP v2.1. Use the `current-dev` path
+checkout to develop or validate the unreleased `1.7.0` CLP v2.4 scene-batch
+API before its registry publication.
 
 The crate package name uses hyphens and the Rust import name uses underscores:
 
@@ -135,6 +142,7 @@ protocol version, session identifier, granted capabilities, and launch context.
 | Connection | `Client::connect_from_env`, `Client::connect`, `session`, `has_capability` |
 | Subscriptions | `subscribe` with `RawInput`, `Terminal`, and `Timing` |
 | Nodes | `create_node`, `set_node`, `remove_node` |
+| Atomic batches | `SceneBatch`, `SceneBatchOperation`, `BatchNodeRef`, `apply_scene_batch` |
 | Images | `upload_image`, `remove_image`, `ImageUpload`, `ImageHandle` |
 | Text | `NodeInput::Text`, `NodeChanges::text`, `NodeChanges::text_style` |
 | Interaction | `ImageContactShape`, `NodeProperties::input_passthrough`, overlap queries |
@@ -190,6 +198,68 @@ independently interactive. It does not hide the node, alter its stacking, or
 disable its overlap participation. This is useful for a decorative image or
 text layer painted above an interactive node.
 
+## Atomic scene batches (CLP v2.4)
+
+Use `SceneBatch` when a complete initial tree or structural revision must reach
+the retained scene as one state. The builder remains a thin typed command
+description, not a widget toolkit or virtual DOM:
+
+```rust
+use chymeral_rust_sdk::{
+    BatchNodeRef, NodeInput, NodeProperties, NodePropertiesPatch, SceneBatch,
+    SceneBatchNodeChanges, SceneLayer,
+};
+
+let batch = SceneBatch::new()
+    .create_node(
+        "panel",
+        None,
+        Some(SceneLayer::Overlay),
+        NodeInput::Rectangle {
+            properties: NodeProperties::new(24.0, 24.0, 280.0, 160.0),
+            color: [36, 88, 216, 255],
+        },
+    )
+    .create_node(
+        "label",
+        Some(BatchNodeRef::alias("panel")),
+        None,
+        NodeInput::Text {
+            properties: chymeral_rust_sdk::TextNodeProperties::new(16.0, 20.0),
+            text: "Ready".to_owned(),
+            style: Default::default(),
+        },
+    )
+    .set_node(
+        BatchNodeRef::alias("panel"),
+        SceneBatchNodeChanges {
+            properties: Some(NodePropertiesPatch {
+                clip_children: Some(true),
+                ..NodePropertiesPatch::default()
+            }),
+            ..SceneBatchNodeChanges::default()
+        },
+    );
+let result = client.apply_scene_batch(batch)?;
+let panel = result.nodes["panel"].node.clone();
+```
+
+Request `Capability::Scene` and `Capability::SceneBatch`. A batch has 1–512
+ordered operations, a 512 KiB JSON command-envelope limit, and unique aliases
+of 1–128 UTF-8 bytes without control characters. An alias may be referenced
+only after its `create_node` operation, so parent-before-child construction is
+explicit. `create_node`, `set_node`, and `remove_node` are supported; image
+uploads/removals, metadata, subscriptions, and frame presentation remain
+separate operations.
+
+The host validates the revision atomically, requests one redraw on success,
+and reports handles only for aliases that remain live. It does not promise
+compositor acknowledgement or physical scanout. A rejected batch returns an
+error without exposing a partial tree. If the host does not grant
+`Capability::SceneBatch`, `apply_scene_batch` returns
+`Error::CapabilityNotGranted`; it never replays the batch as visible sequential
+`create_node` or `set_node` traffic.
+
 ## Frame-paced presentation (CLP v2.1)
 
 `present_scene` is for the newest transient geometry, not for reliable scene
@@ -231,11 +301,13 @@ do not wait for one status per high-rate input sample. `Presented` reaches the
 host presentation call, not confirmed monitor scanout. Keep creates, removes,
 style changes, hierarchy changes, and other ordered work on `set_node`.
 
-`Client::connect` first requests CLP v2.1. If a v2.0-only host explicitly
+`Client::connect` first requests CLP v2.4. If a v2.0-only host explicitly
 rejects that lifecycle request, it reconnects once using v2.0 without
-`Capability::Presentation` or `Capability::WindowMetadata`. In that case
-`present_scene` and `set_window_metadata` return `CapabilityNotGranted`; the
-SDK never expands a presentation packet into individual `set_node` commands.
+`Capability::Presentation`, `Capability::WindowMetadata`, or
+`Capability::SceneBatch`. A v2.1 host can negotiate its lower minor version
+and likewise does not grant `SceneBatch`. In either case the newer methods
+return `CapabilityNotGranted`; the SDK never expands a presentation packet or
+scene batch into individual `set_node` commands.
 
 ## Application window metadata (CLP v2.1)
 
@@ -307,9 +379,10 @@ cargo run --example clp_conformance
 
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
 and GIF image upload/removal, alpha-contact visual mutation, text, overlap
-queries, a title-plus-icon metadata update, title-only preservation, explicit
-metadata clearing when a v2.1 host grants that capability, and a clean close.
-It must return to the same terminal without closing it.
+queries, atomic scene-batch creation/update/removal, a title-plus-icon metadata
+update, title-only preservation, explicit metadata clearing when a v2.1 host
+grants that capability, and a clean close. It must return to the same terminal
+without closing it.
 
 The host repository also maintains a versioned,
 language-neutral [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0).
@@ -325,6 +398,12 @@ This crate also vendors the byte-checked CLP v2.1 fixture corpus in
 packet, a rejected intrinsic-text bounds packet, and application window
 metadata patch preservation and clearing, while the v2.0 replay verifies
 automatic one-time fallback.
+
+The `fixtures/clp/v2.4` snapshot adds the byte-checked `scene_batch` lifecycle
+and result vector. It verifies the public `SceneBatch` API, local aliases, and
+the ordered atomic result. A client negotiated below v2.4 never receives
+`Capability::SceneBatch`; applications decide explicitly whether to use their
+own incremental alternative.
 
 For interactive scene validation in a graphical Chymeral session, run:
 
@@ -373,11 +452,12 @@ guide to Chymeral configuration and the complete runtime behavior.
 
 ## Version and contribution policy
 
-This crate's `1.5.x` line is the stable Rust binding for CLP v2.1 and retains
-one-time CLP v2.0 fallback. The earlier `1.0.x` line supports CLP v2.0. The
-future breaking `2.0.0` line is reserved for a separately validated
-platform-capability expansion. Chymeral application versions, CLP protocol
-versions, and SDK versions are independent:
+This crate's released `1.5.x` line is the stable Rust binding for CLP v2.1 and
+retains one-time CLP v2.0 fallback. The `current-dev` `1.7.0` line prepares CLP
+v2.4 scene batches while retaining the same fallback. The earlier `1.0.x` line
+supports CLP v2.0. The future breaking `2.0.0` line is reserved for a
+separately validated platform-capability expansion. Chymeral application
+versions, CLP protocol versions, and SDK versions are independent:
 compatibility follows the negotiated CLP contract rather than matching version
 strings. The core Chymeral application is not a supported Rust library; this
 crate is the supported Rust client surface.

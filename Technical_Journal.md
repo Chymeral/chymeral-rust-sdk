@@ -133,6 +133,30 @@ session returns to the same shell, while the surrounding Chymeral terminal
 remains active. Windows named-pipe backpressure was specifically hardened in
 the host before this SDK was accepted as the M14 reference client.
 
+## M26 atomic scene batches
+
+The `current-dev` `1.7.0` line adds the typed CLP v2.4 `SceneBatch` API without
+changing the SDK's synchronous transport model. A batch is an ordered list of
+`create_node`, `set_node`, and `remove_node` operations. `BatchNodeRef` makes
+the distinction between an existing opaque `NodeHandle` and a batch-local alias
+explicit; a `create_node` alias is usable only by later operations. The helper
+does not define a widget abstraction, virtual DOM, host plugin, or alternative
+scene graph.
+
+`Client::apply_scene_batch` first requires both `Scene` and `SceneBatch`, then
+validates operation count, command size, aliases, parent/layer structure, and
+the already-established image, text, overlap, and external-drop capability
+requirements. Its result preserves operation order and exposes only aliases
+whose nodes remain live at commit. This allows a batch to use temporary nodes
+without leaking a false long-lived handle.
+
+The feature does not hide a compatibility policy inside the client. A host
+negotiated below v2.4 cannot grant `SceneBatch`, and the method returns an
+explicit capability error rather than expanding a batch into serial scene
+commands. The existing v2.0 reconnect remains limited to lifecycle fallback.
+The v2.4 fixture corpus and live conformance path exercise the same public API
+against an independent fake host and a real Chymeral window respectively.
+
 ## Intentional boundaries
 
 - The crate is published to crates.io; this repository remains the authoritative

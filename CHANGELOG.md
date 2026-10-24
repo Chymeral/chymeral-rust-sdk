@@ -6,10 +6,27 @@ application and CLP protocol have independent version lines.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- Replaced the internal M20 milestone label in the interactive conformance
-  example and README with stable CLP v2.1 wording.
+- CLP v2.4 `Capability::SceneBatch`, `SceneBatch`,
+  `SceneBatchOperation`, `BatchNodeRef`, `BatchNodeParent`,
+  `SceneBatchNodeChanges`, `SceneBatchResult`, and
+  `Client::apply_scene_batch`.
+- Byte-checked v2.4 fixture replay and live conformance coverage for atomic
+  create/update/remove batches, aliases, returned surviving handles, and a
+  temporary node removed before commit.
+
+### Changed
+
+- Connection now requests CLP v2.4. The v2.0 retry removes `SceneBatch` along
+  with the previous v2.1-only capabilities; no unavailable batch is silently
+  replayed as sequential node commands.
+
+### Compatibility
+
+- The unreleased `1.7.0` development line implements CLP v2.4 and retains the
+  existing v2.0 fallback. The released `1.5.x` line remains the stable CLP
+  v2.1 binding.
 
 ## [1.5.0] - 2026-10-22
 

@@ -4,10 +4,10 @@ use std::{
 };
 
 use chymeral_rust_sdk::{
-    Capabilities, Capability, Client, CloseReason, Event, ImageContactShape, ImageUpload, Key,
-    KeyState, MetadataField, NodeChanges, NodeInput, NodeProperties, NodePropertiesPatch,
-    NodeVisual, Notification, SceneLayer, Subscription, TextNodeProperties, TextStyle,
-    WindowMetadataPatch,
+    BatchNodeRef, Capabilities, Capability, Client, CloseReason, Event, ImageContactShape,
+    ImageUpload, Key, KeyState, MetadataField, NodeChanges, NodeInput, NodeProperties,
+    NodePropertiesPatch, NodeVisual, Notification, SceneBatch, SceneBatchNodeChanges, SceneLayer,
+    Subscription, TextNodeProperties, TextStyle, WindowMetadataPatch,
 };
 
 const ALPHA_TOGGLE_GIF: &[u8] = &[
@@ -148,6 +148,70 @@ fn main() -> Result<(), Box<dyn Error>> {
         || styled_text.height <= 0.0
     {
         return Err("text style update returned invalid intrinsic metrics".into());
+    }
+
+    if client.has_capability(Capability::SceneBatch) {
+        let batch = SceneBatch::new()
+            .create_node(
+                "batch-root",
+                None,
+                Some(SceneLayer::Overlay),
+                NodeInput::Empty {
+                    properties: NodeProperties {
+                        visible: false,
+                        ..NodeProperties::new(320.0, 48.0, 120.0, 72.0)
+                    },
+                },
+            )
+            .create_node(
+                "batch-label",
+                Some(BatchNodeRef::alias("batch-root")),
+                None,
+                NodeInput::Text {
+                    properties: TextNodeProperties {
+                        visible: false,
+                        ..TextNodeProperties::new(8.0, 8.0)
+                    },
+                    text: "batch".to_owned(),
+                    style: TextStyle::default(),
+                },
+            )
+            .set_node(
+                BatchNodeRef::alias("batch-root"),
+                SceneBatchNodeChanges {
+                    properties: Some(NodePropertiesPatch {
+                        x: Some(336.0),
+                        ..NodePropertiesPatch::default()
+                    }),
+                    ..SceneBatchNodeChanges::default()
+                },
+            )
+            .create_node(
+                "batch-temporary",
+                None,
+                Some(SceneLayer::Overlay),
+                NodeInput::Empty {
+                    properties: NodeProperties {
+                        visible: false,
+                        ..NodeProperties::new(0.0, 0.0, 1.0, 1.0)
+                    },
+                },
+            )
+            .remove_node(BatchNodeRef::alias("batch-temporary"));
+        let batch = client.apply_scene_batch(batch)?;
+        let batch_root = batch
+            .nodes
+            .get("batch-root")
+            .ok_or("scene batch did not return its surviving root alias")?
+            .node
+            .clone();
+        if !batch.nodes.contains_key("batch-label")
+            || batch.nodes.contains_key("batch-temporary")
+            || batch.operations.len() != 5
+        {
+            return Err("scene batch result did not reflect its final retained tree".into());
+        }
+        client.remove_node(&batch_root)?;
     }
 
     let collider = client

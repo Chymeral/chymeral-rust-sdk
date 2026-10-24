@@ -1,10 +1,10 @@
 use chymeral_rust_sdk::{
-    Capabilities, Capability, Client, CloseReason, DeliveryCategory, Error, Event,
+    BatchNodeRef, Capabilities, Capability, Client, CloseReason, DeliveryCategory, Error, Event,
     ImageContactShape, ImageUpload, MetadataField, NodeChanges, NodeHandle, NodeInput,
     NodeProperties, NodePropertiesPatch, Notification, PresentationId, PresentationPropertiesPatch,
-    PresentationState, PresentationUpdate, ProgramPhase, SceneEvent, SceneLayer, Subscription,
-    TextAlign, TextNodeProperties, TextStyle, TextWeight, WindowMetadataPatch,
-    WindowMetadataStatus, WindowMetadataSupport,
+    PresentationState, PresentationUpdate, ProgramPhase, SceneBatch, SceneBatchNodeChanges,
+    SceneBatchOperationResult, SceneEvent, SceneLayer, Subscription, TextAlign, TextNodeProperties,
+    TextStyle, TextWeight, WindowMetadataPatch, WindowMetadataStatus, WindowMetadataSupport,
 };
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName, prelude::*};
 use serde::Deserialize;
@@ -22,6 +22,8 @@ const FIXTURE_V2_0_BYTES: &str = include_str!("../fixtures/clp/v2.0/fixtures.jso
 const FIXTURE_V2_0_SHA256: &str = include_str!("../fixtures/clp/v2.0/SHA256SUMS");
 const FIXTURE_V2_1_BYTES: &str = include_str!("../fixtures/clp/v2.1/fixtures.json");
 const FIXTURE_V2_1_SHA256: &str = include_str!("../fixtures/clp/v2.1/SHA256SUMS");
+const FIXTURE_V2_4_BYTES: &str = include_str!("../fixtures/clp/v2.4/fixtures.json");
+const FIXTURE_V2_4_SHA256: &str = include_str!("../fixtures/clp/v2.4/SHA256SUMS");
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -89,9 +91,26 @@ fn replays_the_vendored_canonical_clp_v2_fixture_corpus_through_the_public_clien
 #[test]
 fn replays_the_vendored_clp_v2_1_fixture_corpus_through_the_public_client() {
     let corpus = load_fixture_corpus(FIXTURE_V2_1_BYTES, FIXTURE_V2_1_SHA256, 1);
-    let (endpoint, host) = spawn_fixture_host(vector(&corpus, "frame-presentation").frames.clone());
-    let mut client = Client::connect(&endpoint, FIXTURE_TOKEN, Capabilities::all())
-        .expect("v2.1 fixture handshake should succeed");
+    let (endpoint, host) = spawn_fixture_host(with_client_protocol_minor(
+        vector(&corpus, "frame-presentation").frames.clone(),
+        4,
+    ));
+    let mut client = Client::connect(
+        &endpoint,
+        FIXTURE_TOKEN,
+        Capabilities::from([
+            Capability::Scene,
+            Capability::Images,
+            Capability::Input,
+            Capability::Timing,
+            Capability::Overlap,
+            Capability::ExternalDrop,
+            Capability::Text,
+            Capability::Presentation,
+            Capability::WindowMetadata,
+        ]),
+    )
+    .expect("v2.1 fixture handshake should succeed");
 
     assert_eq!(client.session().protocol_version.minor, 1);
     assert!(client.has_capability(chymeral_rust_sdk::Capability::Presentation));
@@ -162,9 +181,101 @@ fn replays_the_vendored_clp_v2_1_fixture_corpus_through_the_public_client() {
     replay_window_metadata(&corpus);
 }
 
+#[test]
+fn replays_the_vendored_clp_v2_4_scene_batch_fixture_through_the_public_client() {
+    let corpus = load_fixture_corpus(FIXTURE_V2_4_BYTES, FIXTURE_V2_4_SHA256, 4);
+    let (endpoint, host) = spawn_fixture_host(vector(&corpus, "atomic-scene-batch").frames.clone());
+    let mut client = Client::connect(
+        &endpoint,
+        FIXTURE_TOKEN,
+        Capabilities::from([Capability::Scene, Capability::Text, Capability::SceneBatch]),
+    )
+    .expect("v2.4 fixture handshake should succeed");
+
+    assert_eq!(client.session().protocol_version.minor, 4);
+    assert!(client.has_capability(Capability::SceneBatch));
+    let result = client
+        .apply_scene_batch(
+            SceneBatch::new()
+                .create_node(
+                    "panel",
+                    None,
+                    Some(SceneLayer::Overlay),
+                    NodeInput::Rectangle {
+                        properties: NodeProperties {
+                            z_index: 3,
+                            ..NodeProperties::new(8.0, 12.0, 240.0, 120.0)
+                        },
+                        color: [36, 88, 216, 255],
+                    },
+                )
+                .create_node(
+                    "label",
+                    Some(BatchNodeRef::alias("panel")),
+                    None,
+                    NodeInput::Text {
+                        properties: TextNodeProperties::new(16.0, 24.0),
+                        text: "Ready".to_owned(),
+                        style: TextStyle::default(),
+                    },
+                )
+                .set_node(
+                    BatchNodeRef::alias("panel"),
+                    SceneBatchNodeChanges {
+                        properties: Some(NodePropertiesPatch {
+                            x: Some(20.0),
+                            clip_children: Some(true),
+                            ..NodePropertiesPatch::default()
+                        }),
+                        ..SceneBatchNodeChanges::default()
+                    },
+                )
+                .create_node(
+                    "temporary",
+                    None,
+                    Some(SceneLayer::Overlay),
+                    NodeInput::Empty {
+                        properties: NodeProperties {
+                            visible: false,
+                            ..NodeProperties::new(0.0, 0.0, 1.0, 1.0)
+                        },
+                    },
+                )
+                .remove_node(BatchNodeRef::alias("temporary")),
+        )
+        .expect("scene batch should match the v2.4 fixture");
+    assert_eq!(result.nodes["panel"].node.as_str(), "node-1");
+    assert_eq!(result.nodes["label"].node.as_str(), "node-2");
+    assert!(!result.nodes.contains_key("temporary"));
+    assert_eq!(result.nodes["label"].text_metrics.unwrap().columns, 5);
+    assert_eq!(
+        result.operations,
+        vec![
+            SceneBatchOperationResult::Created {
+                alias: "panel".to_owned(),
+            },
+            SceneBatchOperationResult::Created {
+                alias: "label".to_owned(),
+            },
+            SceneBatchOperationResult::Updated { text_metrics: None },
+            SceneBatchOperationResult::Created {
+                alias: "temporary".to_owned(),
+            },
+            SceneBatchOperationResult::Removed,
+        ]
+    );
+    assert_eq!(
+        client.close().expect("fixture close should succeed"),
+        CloseReason::ClientRequested
+    );
+    join_host(host);
+}
+
 fn replay_window_metadata(corpus: &FixtureCorpus) {
-    let (endpoint, host) =
-        spawn_fixture_host(vector(corpus, "application-window-metadata").frames.clone());
+    let (endpoint, host) = spawn_fixture_host(with_client_protocol_minor(
+        vector(corpus, "application-window-metadata").frames.clone(),
+        4,
+    ));
     let mut client = Client::connect(
         &endpoint,
         FIXTURE_TOKEN,
@@ -528,6 +639,18 @@ fn vector<'a>(corpus: &'a FixtureCorpus, id: &str) -> &'a FixtureVector {
         .unwrap_or_else(|| panic!("fixture corpus does not contain vector {id}"))
 }
 
+fn with_client_protocol_minor(mut frames: Vec<FixtureFrame>, minor: u16) -> Vec<FixtureFrame> {
+    let hello = frames
+        .first_mut()
+        .and_then(|frame| frame.message.as_mut())
+        .expect("fixture vector must begin with a JSON hello");
+    let protocol_minor = hello
+        .pointer_mut("/protocol/minor")
+        .expect("fixture hello must include protocol.minor");
+    *protocol_minor = Value::from(minor);
+    frames
+}
+
 fn spawn_fixture_host(
     frames: Vec<FixtureFrame>,
 ) -> (String, JoinHandle<std::result::Result<(), String>>) {
@@ -564,9 +687,9 @@ fn spawn_fixture_host_with_legacy_fallback(
                 format!("fixture fallback received invalid hello JSON: {error}")
             })?;
             if message_type(&hello)? != "hello"
-                || hello.pointer("/protocol/minor").and_then(Value::as_u64) != Some(1)
+                || hello.pointer("/protocol/minor").and_then(Value::as_u64) != Some(4)
             {
-                return Err("fixture fallback expected a CLP v2.1 hello".to_owned());
+                return Err("fixture fallback expected a CLP v2.4 hello".to_owned());
             }
             let rejection = serde_json::json!({
                 "type": "error",
