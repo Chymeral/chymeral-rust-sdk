@@ -353,7 +353,10 @@ fn manual_interaction_demo(client: &mut Client) -> Result<(), Box<dyn Error>> {
         )?
         .node;
 
-    println!("CLP v2.1 manual interaction scene is ready.");
+    println!(
+        "CLP v{} manual interaction scene is ready.",
+        client.session().protocol_version
+    );
     println!(
         "- Click the blue area or the transparent center of the orange frame: the blue node receives the event."
     );

@@ -374,7 +374,7 @@ a host-system family lookup.
 From a terminal inside Chymeral, run:
 
 ```text
-cargo run --example clp_conformance
+cargo run --locked --release --example clp_conformance
 ```
 
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
@@ -408,13 +408,14 @@ own incremental alternative.
 For interactive scene validation in a graphical Chymeral session, run:
 
 ```text
-cargo run --example clp_conformance -- --manual
+cargo run --locked --release --example clp_conformance -- --manual
 ```
 
 The same executable keeps a blue target, an orange alpha-frame image, a pink
 GIF tile that alternates between opaque and transparent, and a visible
 passthrough band on screen. Its terminal output identifies directed scene
-events and animated overlap transitions. Click the orange frame versus its
+events, animated overlap transitions, and the CLP version negotiated with the
+host. Click the orange frame versus its
 transparent center, click the pink tile in both states, click the white band,
 optionally drop a desktop file on each region where the backend supports it,
 then click a scene node and press `q`. Only the CLP client closes; the terminal

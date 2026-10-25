@@ -21,6 +21,8 @@ application and CLP protocol have independent version lines.
 - Connection now requests CLP v2.4. The v2.0 retry removes `SceneBatch` along
   with the previous v2.1-only capabilities; no unavailable batch is silently
   replayed as sequential node commands.
+- The live manual conformance example now reports the CLP version negotiated
+  with its host instead of a stale feature-era version label.
 
 ### Compatibility
 

@@ -34,10 +34,11 @@ The conformance executable needs a Chymeral terminal session for live
 validation. Launch Chymeral, open its terminal, then run:
 
 ```text
-cargo run --example clp_conformance
+cargo run --locked --release --example clp_conformance
 ```
 
-Use `-- --manual` for the visual scene check. Do not commit `target/`, personal
+Use `-- --manual` for the visual scene check; the example reports the CLP
+version negotiated with the host. Do not commit `target/`, personal
 configuration, generated binaries, or screenshots unless an issue explicitly
 requires a small reproducible fixture.
 
