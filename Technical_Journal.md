@@ -157,6 +157,16 @@ commands. The existing v2.0 reconnect remains limited to lifecycle fallback.
 The v2.4 fixture corpus and live conformance path exercise the same public API
 against an independent fake host and a real Chymeral window respectively.
 
+## M26.1 internal source structure
+
+M26.1 is a no-wire, no-API maintenance pass for the `current-dev` `1.7.0`
+line. `lib.rs` remains the documented public facade; client orchestration, the
+private wire schema, local framing, and private tests are separated into
+focused source units. This preserves the synchronous transport model, every
+public Rust and Rustdoc path, and the byte-identical vendored fixture corpus.
+The private module paths are implementation detail, not additional supported
+imports for consumers.
+
 ## Intentional boundaries
 
 - The crate is published to crates.io; this repository remains the authoritative
