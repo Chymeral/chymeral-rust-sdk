@@ -3,3 +3,5 @@ fixtures/clp/v2.0/fixtures.json text eol=lf
 fixtures/clp/v2.0/SHA256SUMS text eol=lf
 fixtures/clp/v2.1/fixtures.json text eol=lf
 fixtures/clp/v2.1/SHA256SUMS text eol=lf
+fixtures/clp/v2.4/fixtures.json text eol=lf
+fixtures/clp/v2.4/SHA256SUMS text eol=lf
