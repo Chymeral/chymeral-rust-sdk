@@ -18,7 +18,7 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The released `1.7.0` crate implements public **CLP v2.4**, including frame
+The released `1.7.1` crate implements public **CLP v2.4**, including frame
 presentation, application window metadata, and reliable atomic scene batches.
 It uses capability negotiation and a bounded compatibility retry for an earlier
 compatible host; unavailable operations fail explicitly rather than receiving a

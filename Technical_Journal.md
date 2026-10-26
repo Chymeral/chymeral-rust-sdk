@@ -2,7 +2,7 @@
 
 This journal records the decisions and delivery scope of the first public
 Chymeral client SDK. It complements the product-facing [README](README.md) and
-the Chymeral host's main manual. The current public baseline is SDK `1.7.0`
+the Chymeral host's main manual. The current public baseline is SDK `1.7.1`
 with CLP v2.4; numbered milestone and release references below are historical
 records, not current guidance.
 
@@ -137,7 +137,7 @@ the host before this SDK was accepted as the M14 reference client.
 
 ## M26 atomic scene batches
 
-The released `1.7.0` line adds the typed CLP v2.4 `SceneBatch` API without
+The released `1.7.1` line adds the typed CLP v2.4 `SceneBatch` API without
 changing the SDK's synchronous transport model. A batch is an ordered list of
 `create_node`, `set_node`, and `remove_node` operations. `BatchNodeRef` makes
 the distinction between an existing opaque `NodeHandle` and a batch-local alias
@@ -161,7 +161,7 @@ against an independent fake host and a real Chymeral window respectively.
 
 ## M26.1 internal source structure
 
-M26.1 is a no-wire, no-API maintenance pass for the `1.7.0` line. `lib.rs`
+M26.1 is a no-wire, no-API maintenance pass for the `1.7.1` line. `lib.rs`
 remains the documented public facade; client orchestration, the
 private wire schema, local framing, and private tests are separated into
 focused source units. This preserves the synchronous transport model, every
