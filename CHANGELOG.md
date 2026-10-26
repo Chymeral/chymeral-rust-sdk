@@ -4,7 +4,12 @@ All notable user-visible changes to the Chymeral Rust SDK are recorded here.
 The crate follows [Semantic Versioning](https://semver.org/); the Chymeral
 application and CLP protocol have independent version lines.
 
+The current release is `1.7.0` with CLP v2.4. Earlier headings are retained as
+a chronological archive and do not describe the current public contract.
+
 ## [Unreleased]
+
+## [1.7.0] - 2026-10-25
 
 ### Added
 
@@ -26,9 +31,8 @@ application and CLP protocol have independent version lines.
 
 ### Compatibility
 
-- The unreleased `1.7.0` development line implements CLP v2.4 and retains the
-  existing v2.0 fallback. The released `1.5.x` line remains the stable CLP
-  v2.1 binding.
+- Version `1.7.0` implements CLP v2.4 and retains the existing v2.0 fallback.
+  The earlier `1.5.x` line implements CLP v2.1.
 
 ## [1.5.0] - 2026-10-22
 

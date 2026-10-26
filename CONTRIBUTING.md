@@ -58,35 +58,22 @@ describe the same release.
 
 ## Public API and protocol rules
 
-Published `1.5.x` is a typed binding for CLP v2.1 with one-time v2.0 fallback.
-The `current-dev` `1.7.0` line adds CLP v2.4 scene batches while retaining that
-fallback. The earlier `1.0.x` line implements CLP v2.0; the future breaking
-`2.0.0` line is reserved for the separately validated platform expansion.
+Published `1.7.x` is a typed binding for CLP v2.4 with capability negotiation
+and a one-time compatibility retry for an earlier compatible host.
 Preserve the synchronous, no-async runtime design unless a proposed major-
 version change says otherwise.
 Changes to public types, methods, serialization, error codes, or lifecycle
 behavior need documentation, focused tests, and a corresponding conformance
-update. A v2.4 client must retain its one-time v2.0 fallback, must never expand
-presentation packets or scene batches into ordered node commands, and must
-remove `presentation`, `window_metadata`, and `scene_batch` from its v2.0
-retry.
+update. A v2.4 client must retain its bounded compatibility retry, must never
+expand presentation packets or scene batches into ordered node commands, and
+must omit unavailable advanced capabilities from that retry.
 
-Use the versioned [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0)
-as the source of `fixtures/clp/v2.0/fixtures.json` and `SHA256SUMS`. Update
-those two files together from a reviewed core revision, then run
-`cargo test --locked --test fixture_corpus`. Do not add a network download or
-a dependency on the Chymeral host to this crate's ordinary CI.
-
-For a CLP v2.1 change, also update the reviewed
-[v2.1 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.1)
-and its vendored `fixtures/clp/v2.1` snapshot together. Check both hashes and
-keep the v2.0 replay to prove compatibility.
-
-For a CLP v2.4 change, also update the reviewed
-[v2.4 fixture corpus](https://github.com/Chymeral/chymeral/tree/current-dev/protocol/fixtures/v2.4)
-and its vendored `fixtures/clp/v2.4` snapshot together. Check both hashes,
-retain the v2.0 and v2.1 replays, and add a live conformance case when the
-feature affects `SceneBatch` behavior.
+For a CLP v2.4 change, update the reviewed
+[v2.4 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.4)
+and its vendored `fixtures/clp/v2.4` snapshot together. Check both hashes, keep
+the complete compatibility regression replay, and add a live conformance case
+when the feature affects `SceneBatch` behavior. Do not add a network download
+or a dependency on the Chymeral host to this crate's ordinary CI.
 
 CLP is language-neutral. Do not add Rust-only protocol behavior, host internals
 as a dependency, silent compatibility aliases, or APIs that cannot be modeled

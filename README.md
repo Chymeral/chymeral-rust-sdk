@@ -18,15 +18,15 @@ by a running Chymeral terminal. It is a standalone client crate: it does not
 depend on Chymeral source code, create a window, load plugins, or make Rust a
 privileged language in the Chymeral ecosystem.
 
-The released `1.5.0` crate supports public **CLP v2.1**, including frame
-presentation and application window metadata. The `current-dev` source line
-prepares `1.7.0` for **CLP v2.4**, adding reliable atomic scene batches. It
-retains a one-time v2.0 fallback for a v2.0-only host and no CLP v1.x command
-aliases. The SDK is synchronous by design and has no async-runtime dependency.
-Version `1.0.0` remains the first stable Rust binding, and the current release
-is available from [crates.io](https://crates.io/crates/chymeral-rust-sdk) with
-generated API documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk).
-The matching [GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
+The released `1.7.0` crate implements public **CLP v2.4**, including frame
+presentation, application window metadata, and reliable atomic scene batches.
+It uses capability negotiation and a bounded compatibility retry for an earlier
+compatible host; unavailable operations fail explicitly rather than receiving a
+hidden sequential substitute. The SDK is synchronous by design and has no
+async-runtime dependency. The current release is available from
+[crates.io](https://crates.io/crates/chymeral-rust-sdk) with generated API
+documentation on [docs.rs](https://docs.rs/chymeral-rust-sdk). The matching
+[GitHub release](https://github.com/Chymeral/chymeral-rust-sdk/releases/latest)
 records its human-readable release notes. Use a local path dependency while
 developing changes against this repository.
 
@@ -46,10 +46,9 @@ developing changes against this repository.
 - Alpha-derived image contact and generic node input passthrough for layered
   scenes without duplicate interaction logic.
 - Incoming external-file-drop events for opt-in scene nodes.
-- An opt-in, coalesced CLP v2.1 frame-presentation lane for bounded transient
-  geometry.
-- Session-owned CLP v2.1 application window metadata with verbatim titles and
-  bounded static RGBA8 icons.
+- An opt-in, coalesced frame-presentation lane for bounded transient geometry.
+- Session-owned application window metadata with verbatim titles and bounded
+  static RGBA8 icons.
 - Opaque `NodeHandle` and `ImageHandle` values that cannot be confused with
   host implementation identifiers.
 - `clp_conformance`, an executable protocol-conformance check.
@@ -79,7 +78,7 @@ Or declare it explicitly:
 
 ```toml
 [dependencies]
-chymeral-rust-sdk = "1.5"
+chymeral-rust-sdk = "1.7"
 ```
 
 For local development, reference the checked-out SDK instead:
@@ -89,9 +88,8 @@ For local development, reference the checked-out SDK instead:
 chymeral-rust-sdk = { path = "../chymeral-rust-sdk" }
 ```
 
-The published `1.5.x` crate implements CLP v2.1. Use the `current-dev` path
-checkout to develop or validate the unreleased `1.7.0` CLP v2.4 scene-batch
-API before its registry publication.
+The published `1.7.x` crate implements CLP v2.4. Use the local path checkout
+only when developing changes against the SDK itself.
 
 The crate package name uses hyphens and the Rust import name uses underscores:
 
@@ -260,7 +258,7 @@ error without exposing a partial tree. If the host does not grant
 `Error::CapabilityNotGranted`; it never replays the batch as visible sequential
 `create_node` or `set_node` traffic.
 
-## Frame-paced presentation (CLP v2.1)
+## Frame-paced presentation
 
 `present_scene` is for the newest transient geometry, not for reliable scene
 control. Request `Capability::Scene` and `Capability::Presentation`, then send
@@ -301,15 +299,13 @@ do not wait for one status per high-rate input sample. `Presented` reaches the
 host presentation call, not confirmed monitor scanout. Keep creates, removes,
 style changes, hierarchy changes, and other ordered work on `set_node`.
 
-`Client::connect` first requests CLP v2.4. If a v2.0-only host explicitly
-rejects that lifecycle request, it reconnects once using v2.0 without
-`Capability::Presentation`, `Capability::WindowMetadata`, or
-`Capability::SceneBatch`. A v2.1 host can negotiate its lower minor version
-and likewise does not grant `SceneBatch`. In either case the newer methods
+`Client::connect` first requests CLP v2.4. If a compatible earlier host rejects
+that lifecycle request, it reconnects once with its conservative compatibility
+profile and omits advanced capabilities. Operations outside the granted set
 return `CapabilityNotGranted`; the SDK never expands a presentation packet or
 scene batch into individual `set_node` commands.
 
-## Application window metadata (CLP v2.1)
+## Application window metadata
 
 Request `Capability::WindowMetadata` to let this session identify its ordinary
 program in the native Chymeral window. `WindowMetadataPatch` uses explicit
@@ -380,30 +376,19 @@ cargo run --locked --release --example clp_conformance
 `clp_conformance` verifies lifecycle, subscriptions, sustained timing, RGBA8
 and GIF image upload/removal, alpha-contact visual mutation, text, overlap
 queries, atomic scene-batch creation/update/removal, a title-plus-icon metadata
-update, title-only preservation, explicit metadata clearing when a v2.1 host
-grants that capability, and a clean close. It must return to the same terminal
-without closing it.
+update, title-only preservation, explicit metadata clearing when that capability
+is granted, and a clean close. It must return to the same terminal without
+closing it.
 
-The host repository also maintains a versioned,
-language-neutral [CLP v2.0 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.0).
-This crate vendors its exact snapshot in `fixtures/clp/v2.0`, including
-`SHA256SUMS`. The `fixture_corpus` integration test verifies that checksum and
-replays every vector through the public client and an independent fake host.
-Update both files only from a reviewed core revision. The corpus complements,
-rather than replaces, this crate's focused fake-host tests and live
-conformance executable.
-
-This crate also vendors the byte-checked CLP v2.1 fixture corpus in
-`fixtures/clp/v2.1`. It verifies the public client against an accepted atomic
-packet, a rejected intrinsic-text bounds packet, and application window
-metadata patch preservation and clearing, while the v2.0 replay verifies
-automatic one-time fallback.
-
-The `fixtures/clp/v2.4` snapshot adds the byte-checked `scene_batch` lifecycle
-and result vector. It verifies the public `SceneBatch` API, local aliases, and
-the ordered atomic result. A client negotiated below v2.4 never receives
-`Capability::SceneBatch`; applications decide explicitly whether to use their
-own incremental alternative.
+The host repository maintains the language-neutral
+[CLP v2.4 fixture corpus](https://github.com/Chymeral/chymeral/tree/main/protocol/fixtures/v2.4).
+This crate vendors its byte-checked snapshot in `fixtures/clp/v2.4`, including
+`SHA256SUMS`, and replays it through the public client and an independent fake
+host. It verifies the complete current lifecycle, capability, scene,
+presentation, metadata, and `SceneBatch` contract. The repository also retains
+compatibility regression vectors internally; the public v2.4 corpus remains the
+canonical reference for SDK authors. These checks complement focused fake-host
+tests and the live conformance executable.
 
 For interactive scene validation in a graphical Chymeral session, run:
 
@@ -453,15 +438,11 @@ guide to Chymeral configuration and the complete runtime behavior.
 
 ## Version and contribution policy
 
-This crate's released `1.5.x` line is the stable Rust binding for CLP v2.1 and
-retains one-time CLP v2.0 fallback. The `current-dev` `1.7.0` line prepares CLP
-v2.4 scene batches while retaining the same fallback. The earlier `1.0.x` line
-supports CLP v2.0. The future breaking `2.0.0` line is reserved for a
-separately validated platform-capability expansion. Chymeral application
-versions, CLP protocol versions, and SDK versions are independent:
-compatibility follows the negotiated CLP contract rather than matching version
-strings. The core Chymeral application is not a supported Rust library; this
-crate is the supported Rust client surface.
+This crate's released `1.7.x` line is the stable Rust binding for CLP v2.4.
+Chymeral application versions, CLP protocol versions, and SDK versions are
+independent: compatibility follows the negotiated capability contract rather
+than matching version strings. The core Chymeral application is not a supported
+Rust library; this crate is the supported Rust client surface.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the public API,
 [CHANGELOG.md](CHANGELOG.md) for release history, and
